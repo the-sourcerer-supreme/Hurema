@@ -1,8 +1,10 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+﻿import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "../styles.css";
 
 const MAX_PROFILE_PHOTO_BYTES = 2 * 1024 * 1024;
+const UI_STATE_STORAGE_KEY = "hurema-ui-state";
+const API_BASE_URL = String(import.meta.env.VITE_API_BASE_URL || "").replace(/\/$/, "");
 const THEME_OPTIONS = [
   { id: "professional", name: "Professional", note: "Calm blue-grey for daily ERP work." },
   { id: "relaxed", name: "Purple", note: "Classic mauve palette for a softer workspace tone." },
@@ -44,8 +46,15 @@ function normalizeQuickAttendance(record, currentDate) {
 }
 
 function createInitialState() {
+  const storedUi = typeof window === "undefined" ? {} : (() => {
+    try {
+      return JSON.parse(window.localStorage.getItem(UI_STATE_STORAGE_KEY) || "{}");
+    } catch {
+      return {};
+    }
+  })();
   const today = localDateKey();
-  const month = today.slice(0, 7);
+  const month = storedUi.currentMonth || today.slice(0, 7);
   return {
     screen: "public",
     authMode: "login",
@@ -53,14 +62,16 @@ function createInitialState() {
     profileMenuOpen: false,
     csrfToken: "",
     toasts: [],
-    profileTab: "resume",
+    profileTab: storedUi.profileTab || "resume",
     manageUserModalId: null,
+    directoryView: storedUi.directoryView || "list",
+    payslipPreview: null,
     me: null,
     role: null,
     theme: "professional",
-    settings: { companyName: "EmPay", companyLogo: "" },
+    settings: { companyName: "Hurema", companyLogo: "" },
     permissions: {},
-    view: "dashboard",
+    view: storedUi.view || "dashboard",
     dashboard: null,
     employees: [],
     leaveTypes: [],
@@ -78,10 +89,16 @@ function createInitialState() {
     serverNow: today,
     currentMonth: month,
     currentDate: today,
-    attendanceFilter: { month, day: "", employeeId: "" },
+    attendanceFilter: {
+      mode: storedUi.attendanceMode || "date",
+      day: storedUi.attendanceDay || "",
+      month: storedUi.attendanceMonth || month,
+      employeeId: "",
+    },
     leaveFilter: { month, status: "", fromDate: "", toDate: "", employeeId: "" },
     payrollFilter: { month, employeeId: "", payrunStatus: "" },
-    reportType: "attendance",
+    reportType: storedUi.reportType || "attendance",
+    reportView: storedUi.reportView || "detail",
   };
 }
 
@@ -143,7 +160,7 @@ async function api(path, options = {}) {
   if (csrfToken && ["POST", "PUT", "PATCH", "DELETE"].includes(method)) {
     headers["X-CSRF-Token"] = csrfToken;
   }
-  const response = await fetch(path, {
+  const response = await fetch(resolveApiPath(path), {
     credentials: "include",
     method,
     headers,
@@ -155,6 +172,14 @@ async function api(path, options = {}) {
     throw new Error(payload?.error || payload?.detail || "Request failed");
   }
   return payload;
+}
+
+function resolveApiPath(path) {
+  if (/^https?:\/\//i.test(String(path || ""))) {
+    return path;
+  }
+  const normalized = String(path || "").startsWith("/") ? String(path) : `/${String(path || "")}`;
+  return API_BASE_URL ? `${API_BASE_URL}${normalized}` : normalized;
 }
 
 function formatCurrency(value) {
@@ -201,7 +226,7 @@ function tagClass(value) {
 }
 
 function initialsFor(name) {
-  return String(name || "EmPay")
+  return String(name || "Hurema")
     .split(" ")
     .filter(Boolean)
     .slice(0, 2)
@@ -228,6 +253,30 @@ function formatReportCell(column, value) {
     return formatCurrency(value);
   }
   return String(value);
+}
+
+function HuremaLogo({ className = "", showCaption = false, caption = "People OS" }) {
+  const classes = ["hurema-logo", className].filter(Boolean).join(" ");
+  const letters = [
+    ["H", "letter-h"],
+    ["U", "letter-u"],
+    ["R", "letter-r"],
+    ["E", "letter-e"],
+    ["M", "letter-m"],
+    ["A", "letter-a"],
+  ];
+  return (
+    <div className={classes}>
+      <div className="hurema-logo-mark" role="img" aria-label="HUREMA">
+        {letters.map(([letter, tone]) => (
+          <span key={letter} className={tone}>
+            {letter}
+          </span>
+        ))}
+      </div>
+      {showCaption ? <span className="hurema-logo-caption">{caption}</span> : null}
+    </div>
+  );
 }
 
 function downloadExcel(filename, rows) {
@@ -259,8 +308,13 @@ function downloadExcel(filename, rows) {
   URL.revokeObjectURL(url);
 }
 
-function triggerPayslipDownload(employeeId, month) {
-  window.open(`/api/payslips/download?${query({ employeeId, month })}`, "_blank");
+function filenameFromDisposition(headerValue, fallback) {
+  const encodedMatch = String(headerValue || "").match(/filename\*=UTF-8''([^;]+)/i);
+  if (encodedMatch?.[1]) {
+    return decodeURIComponent(encodedMatch[1]);
+  }
+  const basicMatch = String(headerValue || "").match(/filename="?([^"]+)"?/i);
+  return basicMatch?.[1] || fallback;
 }
 
 function formatTimer(totalSeconds) {
@@ -624,8 +678,8 @@ function PublicScreen({ onMode }) {
     <section className="public-shell">
       <header className="landing-header">
         <div className="brand-lockup">
-          <span className="brand-mark">EmPay</span>
-          <span className="brand-copy">Smart Human Resource Management</span>
+          <HuremaLogo className="landing-brand-logo" />
+          <span className="brand-copy">Human resource management for modern teams, delivered in one calm workspace.</span>
         </div>
         <div className="header-actions">
           <button className="button ghost" onClick={() => onMode("login")}>
@@ -639,10 +693,10 @@ function PublicScreen({ onMode }) {
       <main className="landing-main">
         <section className="hero-copy">
           <span className="eyebrow">Built for modern operations</span>
-          <h1>Run people, attendance, leave, and payroll from one calm workspace.</h1>
+          <h1>Operate hiring, attendance, leave, payroll, and reports from one polished Hurema workspace.</h1>
           <p>
-            EmPay brings together employee management, attendance visibility, filtered leave workflows,
-            and payroll history in one clean system designed for startups, institutions, and growing teams.
+            Hurema brings people operations, payroll coordination, and employee self-service into a single system
+            that feels structured for admins, simple for HR teams, and clear for every employee.
           </p>
           <div className="hero-actions">
             <button className="button primary" onClick={() => onMode("signup")}>
@@ -653,49 +707,114 @@ function PublicScreen({ onMode }) {
             </button>
           </div>
           <div className="hero-points">
-            <div className="hero-point">Role-based HRMS</div>
-            <div className="hero-point">Manual attendance with check-in and check-out time</div>
-            <div className="hero-point">Payslip generation and downloads</div>
+            <div className="hero-point">
+              <strong>Role-Based Access</strong>
+              <span>Separate admin, HR, payroll, and employee experiences without clutter.</span>
+            </div>
+            <div className="hero-point">
+              <strong>Attendance That Stays Accurate</strong>
+              <span>Track check-in, pause, resume, and checkout in a clean employee-first flow.</span>
+            </div>
+            <div className="hero-point">
+              <strong>Payslips and Reports Ready</strong>
+              <span>Generate themed PDFs, export data, and keep salary records organized.</span>
+            </div>
           </div>
         </section>
         <section className="hero-preview card">
-          <div className="hero-glow"></div>
+          <div className="preview-brand-row">
+            <HuremaLogo className="preview-brand-logo" showCaption caption="People Operations Suite" />
+            <Tag value="Unified workspace" />
+          </div>
           <div className="preview-top">
             <div>
               <span className="eyebrow">Operations Snapshot</span>
-              <h2>Everything the team needs, nothing noisy.</h2>
+              <h2>Everything your team needs, without the noise.</h2>
+              <p className="preview-intro">A structured operating layer for employee data, attendance behavior, leave requests, compensation control, and leadership reporting.</p>
             </div>
-            <Tag value="Unified workspace" />
           </div>
-          <div className="floating-ribbon ribbon-one">Attendance</div>
-          <div className="floating-ribbon ribbon-two">Payroll</div>
-          <div className="floating-ribbon ribbon-three">Reports</div>
           <div className="preview-metrics">
             <article>
-              <span>Total People</span>
-              <strong>128</strong>
+              <span>Active People</span>
+              <strong>148</strong>
+              <small>Across Admin, HR, Payroll, and Employees</small>
             </article>
             <article>
-              <span>Pending Leave</span>
-              <strong>09</strong>
+              <span>Attendance Accuracy</span>
+              <strong>91.4%</strong>
+              <small>Live check-in and checkout visibility</small>
             </article>
             <article>
-              <span>Payroll Ready</span>
-              <strong>96%</strong>
+              <span>Payroll Visibility</span>
+              <strong>₹61.2L</strong>
+              <small>Monthly payroll with payslip exports</small>
             </article>
           </div>
-          <div className="preview-columns">
+          <div className="landing-visual-grid">
+            <article className="landing-visual-card">
+              <div className="landing-visual-head">
+                <span className="eyebrow">Department Headcount</span>
+                <strong>Live organisation split</strong>
+              </div>
+              <div className="landing-mini-bars">
+                {[
+                  ["Engineering", 82, "tone-blue"],
+                  ["Operations", 57, "tone-gold"],
+                  ["HR", 18, "tone-cyan"],
+                  ["Finance", 23, "tone-coral"],
+                ].map(([label, value, tone]) => (
+                  <div key={label} className="landing-mini-bar-row">
+                    <span>{label}</span>
+                    <div className="landing-mini-bar-track">
+                      <div className={`landing-mini-bar-fill ${tone}`} style={{ width: `${value}%` }}></div>
+                    </div>
+                    <strong>{value}</strong>
+                  </div>
+                ))}
+              </div>
+            </article>
+            <article className="landing-visual-card">
+              <div className="landing-visual-head">
+                <span className="eyebrow">Daily Workflow</span>
+                <strong>Clean operational rhythm</strong>
+              </div>
+              <div className="landing-flow-list">
+                <div className="landing-flow-item">
+                  <i className="tone-blue"></i>
+                  <div>
+                    <strong>People and profiles</strong>
+                    <span>Onboard users, assign roles, and send login credentials securely.</span>
+                  </div>
+                </div>
+                <div className="landing-flow-item">
+                  <i className="tone-cyan"></i>
+                  <div>
+                    <strong>Attendance and leave</strong>
+                    <span>Employees own attendance actions while HR and Admin stay in view mode.</span>
+                  </div>
+                </div>
+                <div className="landing-flow-item">
+                  <i className="tone-gold"></i>
+                  <div>
+                    <strong>Payroll and reports</strong>
+                    <span>Generate salary structures, payslips, exports, and month-end summaries.</span>
+                  </div>
+                </div>
+              </div>
+            </article>
+          </div>
+          <div className="landing-proof-grid">
             <div className="preview-block">
               <h3>People Operations</h3>
-              <p>Manage employees, HR officers, and payroll officers with clear responsibilities.</p>
+              <p>Manage employees, HR officers, and payroll officers with role-aware workflows and cleaner access control.</p>
             </div>
             <div className="preview-block">
               <h3>Attendance Ownership</h3>
-              <p>Every user marks their own attendance with date and time. Managers only view logs.</p>
+              <p>Every employee controls their own attendance timeline while reviewers analyze clean logs and reports.</p>
             </div>
             <div className="preview-block">
               <h3>Payroll Control</h3>
-              <p>Generate payruns, maintain salary structures, track history, and download payslips.</p>
+              <p>Maintain structured compensation, preview themed payslips, and export records when finance needs them.</p>
             </div>
           </div>
         </section>
@@ -729,7 +848,7 @@ function AuthScreen({ mode, onBack, onModeChange, onLogin, onSignup, onError }) 
           {companyLogo && mode === "signup" ? (
             <img className="auth-logo-preview" src={companyLogo} alt="Company logo preview" />
           ) : (
-            <span className="brand-mark auth-brand-mark">odoo</span>
+            <HuremaLogo className="auth-primary-logo" showCaption caption="People Operations Platform" />
           )}
         </div>
         <div className="auth-helper-card">
@@ -746,8 +865,8 @@ function AuthScreen({ mode, onBack, onModeChange, onLogin, onSignup, onError }) 
             }}
             >
               <label>
-                <span>Email</span>
-                <input type="email" name="email" placeholder="Enter your email" autoComplete="username" required />
+                <span>Email or Login ID</span>
+                <input type="text" name="identifier" placeholder="Enter your email or login ID" autoComplete="username" required />
               </label>
               <label>
                 <span className="auth-password-label">
@@ -788,7 +907,10 @@ function AuthScreen({ mode, onBack, onModeChange, onLogin, onSignup, onError }) 
                 {companyLogo ? (
                   <img className="auth-logo-preview" src={companyLogo} alt="Company logo preview" />
                 ) : (
-                  <span className="auth-logo-placeholder">App/Web Logo</span>
+                  <div className="auth-logo-placeholder-wrap">
+                    <HuremaLogo className="auth-secondary-logo" />
+                    <span className="auth-logo-placeholder">Upload your company logo</span>
+                  </div>
                 )}
               </div>
               <div className="auth-logo-upload-copy">
@@ -1313,18 +1435,20 @@ function ToastViewport({ toasts }) {
   );
 }
 
-function ModalShell({ title, onClose, children }) {
+function ModalShell({ title, eyebrow = "User Detail", onClose, actions = null, className = "", children }) {
   return (
     <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal-card" onClick={(event) => event.stopPropagation()}>
+      <div className={`modal-card ${className}`.trim()} onClick={(event) => event.stopPropagation()}>
         <div className="panel-actions">
           <div>
-            <span className="eyebrow">User Detail</span>
+            <span className="eyebrow">{eyebrow}</span>
             <h3>{title}</h3>
           </div>
-          <button type="button" className="button ghost small" onClick={onClose}>
-            Close
-          </button>
+          {actions || (
+            <button type="button" className="button ghost small" onClick={onClose}>
+              Close
+            </button>
+          )}
         </div>
         {children}
       </div>
@@ -1382,6 +1506,41 @@ function UserDetailModal({ user, onClose, onSave, onDelete }) {
           </button>
         </div>
       </form>
+    </ModalShell>
+  );
+}
+
+function PayslipPreviewModal({ preview, onClose }) {
+  if (!preview?.url) {
+    return null;
+  }
+  return (
+    <ModalShell
+      title={preview.title || "Payslip Preview"}
+      eyebrow="PDF Preview"
+      onClose={onClose}
+      className="modal-card-wide"
+      actions={
+        <div className="inline-actions modal-actions-row">
+          <a className="button primary small" href={preview.url} download={preview.filename}>
+            Download PDF
+          </a>
+          <button type="button" className="button ghost small" onClick={onClose}>
+            Close
+          </button>
+        </div>
+      }
+    >
+      <div className="pdf-preview-shell">
+        <object className="pdf-preview-frame" data={preview.url} type="application/pdf" aria-label={preview.title || "Payslip PDF preview"}>
+          <div className="pdf-preview-fallback">
+            <p>PDF preview is not available in this browser.</p>
+            <a className="button primary small" href={preview.url} download={preview.filename}>
+              Download PDF
+            </a>
+          </div>
+        </object>
+      </div>
     </ModalShell>
   );
 }
@@ -1540,6 +1699,7 @@ function App() {
   const [state, setState] = useState(createInitialState);
   const toastTimersRef = useRef(new Map());
   const profilePhotoInputRef = useRef(null);
+  const companyLogoInputRef = useRef(null);
 
   const availableViews = useMemo(
     () =>
@@ -1580,38 +1740,71 @@ function App() {
     async function bootstrap() {
       try {
         const auth = await api("/api/auth/me");
+        const storedUi = (() => {
+          try {
+            return JSON.parse(window.localStorage.getItem(UI_STATE_STORAGE_KEY) || "{}");
+          } catch {
+            return {};
+          }
+        })();
         const resolvedDate = localDateKey();
-        const resolvedMonth = resolvedDate.slice(0, 7);
+        const resolvedMonth = storedUi.currentMonth || resolvedDate.slice(0, 7);
+        const restoredView = storedUi.view && viewConfig[storedUi.view]?.roles.includes(auth.role) ? storedUi.view : "dashboard";
+        const restoredProfileTab = storedUi.profileTab || "resume";
+        const restoredDirectoryView = storedUi.directoryView === "grid" ? "grid" : "list";
+        const restoredReportType = storedUi.reportType || "attendance";
+        const restoredReportView = storedUi.reportView || "detail";
+        const restoredAttendanceDay = storedUi.attendanceDay || "";
+        const restoredAttendanceMonth = storedUi.attendanceMonth || resolvedMonth;
+        const restoredAttendanceMode = storedUi.attendanceMode || "date";
         setState((prev) => ({
           ...prev,
           screen: "app",
-        csrfToken: auth.csrfToken || "",
-        me: auth.user,
-        role: auth.role,
-        serverNow: auth.serverNow || prev.serverNow,
-        currentDate: resolvedDate,
-        currentMonth: resolvedMonth,
-        settings: auth.settings || prev.settings,
-        permissions: auth.permissions || {},
-        selectedUserId: auth.user.id,
-        attendanceFilter: { ...prev.attendanceFilter, employeeId: auth.user.id, month: resolvedMonth },
-        leaveFilter: { ...prev.leaveFilter, employeeId: auth.user.id, month: resolvedMonth },
-        payrollFilter: { ...prev.payrollFilter, employeeId: auth.user.id, month: resolvedMonth },
-      }));
-      await loadView("dashboard", {
-        me: auth.user,
-        role: auth.role,
-        serverNow: auth.serverNow,
-        currentDate: resolvedDate,
-        currentMonth: resolvedMonth,
-        permissions: auth.permissions || {},
-        settings: auth.settings || state.settings,
-        selectedUserId: auth.user.id,
-      });
-    } catch {
-      setState((prev) => ({ ...prev, screen: "public" }));
+          csrfToken: auth.csrfToken || "",
+          me: auth.user,
+          role: auth.role,
+          serverNow: auth.serverNow || prev.serverNow,
+          currentDate: resolvedDate,
+          currentMonth: resolvedMonth,
+          settings: auth.settings || prev.settings,
+          permissions: auth.permissions || {},
+          selectedUserId: auth.user.id,
+          view: restoredView,
+          profileTab: restoredProfileTab,
+          directoryView: restoredDirectoryView,
+          reportType: restoredReportType,
+          reportView: restoredReportView,
+          attendanceFilter: {
+            employeeId: auth.user.id,
+            day: restoredAttendanceDay,
+            month: restoredAttendanceMonth,
+            mode: restoredAttendanceMode,
+          },
+          leaveFilter: { ...prev.leaveFilter, employeeId: auth.user.id, month: resolvedMonth },
+          payrollFilter: { ...prev.payrollFilter, employeeId: auth.user.id, month: resolvedMonth },
+        }));
+        await loadView(restoredView, {
+          me: auth.user,
+          role: auth.role,
+          serverNow: auth.serverNow,
+          currentDate: resolvedDate,
+          currentMonth: resolvedMonth,
+          permissions: auth.permissions || {},
+          settings: auth.settings || state.settings,
+          selectedUserId: auth.user.id,
+          reportType: restoredReportType,
+          reportView: restoredReportView,
+          attendanceFilter: {
+            employeeId: auth.user.id,
+            day: restoredAttendanceDay,
+            month: restoredAttendanceMonth,
+            mode: restoredAttendanceMode,
+          },
+        });
+      } catch {
+        setState((prev) => ({ ...prev, screen: "public" }));
+      }
     }
-  }
 
   async function loadEmployees(includeAdmins = false) {
     const payload = await api(includeAdmins ? "/api/employees?includeAdmins=true" : "/api/employees");
@@ -1650,8 +1843,25 @@ function App() {
     if (ctx.permissions?.canViewAttendanceDirectory || role === "Employee") {
       await loadEmployees(role === "Admin");
     }
-    const attendance = await api(`/api/attendance?${query(filter)}`);
-    setState((prev) => ({ ...prev, attendance, attendanceFilter: filter }));
+    const mode = filter.mode || "date";
+    const selectedMonth = filter.month || ctx.currentMonth || state.currentMonth || localDateKey().slice(0, 7);
+    const selectedDay = filter.day || (mode === "date" ? (ctx.currentDate || state.currentDate || localDateKey()) : "");
+    const normalizedFilter = {
+      employeeId: filter.employeeId || (role === "Employee" ? (ctx.me ?? state.me)?.id : ""),
+      day: mode === "date" ? selectedDay : "",
+      month: mode === "month" ? selectedMonth : "",
+    };
+    const attendance = await api(`/api/attendance?${query(normalizedFilter)}`);
+    setState((prev) => ({
+      ...prev,
+      attendance,
+      attendanceFilter: {
+        employeeId: normalizedFilter.employeeId,
+        day: mode === "date" ? selectedDay : "",
+        month: mode === "month" ? selectedMonth : prev.attendanceFilter.month || selectedMonth,
+        mode,
+      },
+    }));
   }
 
   async function loadLeaveData(filter = state.leaveFilter, ctx = state) {
@@ -1688,7 +1898,7 @@ function App() {
 
   async function loadReports(type = state.reportType, month = state.currentMonth) {
     const report = await api(`/api/reports?type=${type}&month=${month}`);
-    setState((prev) => ({ ...prev, report, reportType: type, currentMonth: month }));
+    setState((prev) => ({ ...prev, report, reportType: type, currentMonth: month, reportView: type === "attendance" ? prev.reportView : "detail" }));
   }
 
   async function loadAudit() {
@@ -1737,7 +1947,7 @@ function App() {
   }, []);
 
   useEffect(() => {
-    const storedTheme = window.localStorage.getItem("empay-theme");
+    const storedTheme = window.localStorage.getItem("hurema-theme");
     if (storedTheme && THEME_OPTIONS.some((theme) => theme.id === storedTheme)) {
       setState((prev) => ({ ...prev, theme: storedTheme }));
     }
@@ -1751,10 +1961,36 @@ function App() {
     []
   );
 
+  useEffect(
+    () => () => {
+      if (state.payslipPreview?.url) {
+        URL.revokeObjectURL(state.payslipPreview.url);
+      }
+    },
+    [state.payslipPreview]
+  );
+
   useEffect(() => {
     document.documentElement.dataset.theme = state.theme || "pearl";
-    window.localStorage.setItem("empay-theme", state.theme || "pearl");
+    window.localStorage.setItem("hurema-theme", state.theme || "pearl");
   }, [state.theme]);
+
+  useEffect(() => {
+    window.localStorage.setItem(
+      UI_STATE_STORAGE_KEY,
+        JSON.stringify({
+          view: state.view,
+          profileTab: state.profileTab,
+          directoryView: state.directoryView,
+          reportType: state.reportType,
+          reportView: state.reportView,
+          currentMonth: state.currentMonth,
+          attendanceDay: state.attendanceFilter?.day || "",
+          attendanceMonth: state.attendanceFilter?.month || "",
+          attendanceMode: state.attendanceFilter?.mode || "date",
+        })
+      );
+  }, [state.view, state.profileTab, state.directoryView, state.reportType, state.reportView, state.currentMonth, state.attendanceFilter]);
 
   useEffect(() => {
     function handleClick(event) {
@@ -1806,6 +2042,70 @@ function App() {
     setState(createInitialState());
   }
 
+  async function handlePreviewPayslip(employeeId, month) {
+    try {
+      const response = await fetch(resolveApiPath(`/api/payslips/download?${query({ employeeId, month })}`), {
+        credentials: "include",
+      });
+      if (!response.ok) {
+        throw new Error("Could not load the payslip preview.");
+      }
+      const blob = await response.blob();
+      const fallbackName = `hurema-payslip-${month}.pdf`;
+      const filename = filenameFromDisposition(response.headers.get("content-disposition"), fallbackName);
+      const previewUrl = URL.createObjectURL(blob);
+      setState((prev) => {
+        if (prev.payslipPreview?.url) {
+          URL.revokeObjectURL(prev.payslipPreview.url);
+        }
+        return {
+          ...prev,
+          payslipPreview: {
+            url: previewUrl,
+            filename,
+            title: `Payslip - ${month}`,
+          },
+        };
+      });
+    } catch (error) {
+      setStatus(error.message || "Could not load the payslip preview.", "error");
+    }
+  }
+
+  function closePayslipPreview() {
+    setState((prev) => {
+      if (prev.payslipPreview?.url) {
+        URL.revokeObjectURL(prev.payslipPreview.url);
+      }
+      return { ...prev, payslipPreview: null };
+    });
+  }
+
+  async function handleDownloadAttendanceReportPdf() {
+    try {
+      const reportMonth = state.currentMonth || localDateKey().slice(0, 7);
+      const response = await fetch(resolveApiPath(`/api/reports/attendance-pdf?${query({ month: reportMonth })}`), {
+        credentials: "include",
+      });
+      if (!response.ok) {
+        throw new Error("Could not download the attendance PDF.");
+      }
+      const blob = await response.blob();
+      const filename = filenameFromDisposition(
+        response.headers.get("content-disposition"),
+        `hurema-attendance-${reportMonth}.pdf`
+      );
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = filename;
+      anchor.click();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      setStatus(error.message || "Could not download the attendance PDF.", "error");
+    }
+  }
+
   async function handleQuickAttendance(values) {
     try {
       await api("/api/attendance/mark", {
@@ -1831,12 +2131,13 @@ function App() {
         setStatus(passwordError, "error");
         return;
       }
-      await api("/api/employees", {
+      const result = await api("/api/employees", {
         method: "POST",
         body: JSON.stringify(payload),
         csrfToken: state.csrfToken,
       });
-      setStatus("New user created.", "success");
+      const details = result.employeeId ? ` Login ID: ${result.employeeId}.` : "";
+      setStatus(`${result.message || "New user created."}${details}`, result.emailSent ? "success" : "error");
       await loadView("manageUsers");
     } catch (error) {
       setStatus(error.message, "error");
@@ -1911,11 +2212,16 @@ function App() {
   async function handleProfilePhotoChange(file) {
     try {
       const profilePhoto = await readFileAsDataUrl(file);
+      await api(`/api/employees/${state.me.id}`, {
+        method: "PUT",
+        body: JSON.stringify({ profilePhoto }),
+        csrfToken: state.csrfToken,
+      });
       setState((prev) => ({
         ...prev,
         me: { ...prev.me, profilePhoto },
       }));
-      setStatus("Profile photo selected.", "success");
+      setStatus("Profile photo updated.", "success");
     } catch (error) {
       setStatus(error.message || "Could not read the selected image.", "error");
     }
@@ -1936,6 +2242,19 @@ function App() {
     } catch (error) {
       setStatus(error.message, "error");
     }
+  }
+
+  async function handleCompanyLogoChange(file) {
+    try {
+      const companyLogo = await readFileAsDataUrl(file);
+      await handleProfileSave({ companyLogo });
+    } catch (error) {
+      setStatus(error.message || "Could not read the selected image.", "error");
+    }
+  }
+
+  async function handleRemoveCompanyLogo() {
+    await handleProfileSave({ companyLogo: "" });
   }
 
   function handleThemeChange(themeId) {
@@ -2076,7 +2395,7 @@ function App() {
                 {state.settings.companyLogo ? (
                   <img className="brand-logo" src={state.settings.companyLogo} alt={state.settings.companyName} />
                 ) : (
-                  <span className="brand-mark">EmPay</span>
+                  <HuremaLogo className="sidebar-fallback-logo" />
                 )}
               </div>
               <div className="sidebar-brand-copy sidebar-text">
@@ -2158,8 +2477,28 @@ function App() {
                         Admin can manage Employee, HR Officer, and Payroll Officer accounts only.
                       </div>
                     </div>
+                    <div className="inline-actions view-toggle">
+                      <button
+                        type="button"
+                        className={`button ghost small ${state.directoryView === "list" ? "is-active" : ""}`}
+                        onClick={() => setState((prev) => ({ ...prev, directoryView: "list" }))}
+                      >
+                        List View
+                      </button>
+                      <button
+                        type="button"
+                        className={`button ghost small ${state.directoryView === "grid" ? "is-active" : ""}`}
+                        onClick={() => setState((prev) => ({ ...prev, directoryView: "grid" }))}
+                      >
+                        Grid View
+                      </button>
+                    </div>
                   </div>
-                  <DirectoryTable employees={state.employees} onSelect={(id) => setState((prev) => ({ ...prev, manageUserModalId: id }))} showAction />
+                  {state.directoryView === "grid" ? (
+                    <DirectoryGrid employees={state.employees} onSelect={(id) => setState((prev) => ({ ...prev, manageUserModalId: id }))} showAction />
+                  ) : (
+                    <DirectoryTable employees={state.employees} onSelect={(id) => setState((prev) => ({ ...prev, manageUserModalId: id }))} showAction />
+                  )}
                 </section>
                 <section className="panel">
                     <div className="panel-actions">
@@ -2182,7 +2521,11 @@ function App() {
                       </div>
                       <div className="split-grid">
                         <label><span>Password</span><input type="password" name="password" autoComplete="new-password" minLength="12" required /></label>
-                        <label><span>Employee ID</span><input name="employeeId" placeholder="EMP-010" /></label>
+                        <div className="stat-block">
+                          <span className="eyebrow">Login ID</span>
+                          <strong>Auto Generated</strong>
+                          <div className="table-note">Generated from name and joining year, then sent to the employee&apos;s email.</div>
+                        </div>
                       </div>
                       <div className="split-grid">
                         <label>
@@ -2228,8 +2571,24 @@ function App() {
                     <h3>People Overview</h3>
                     <div className="table-note">HR and Payroll can view employee details and attendance snapshots only.</div>
                   </div>
+                  <div className="inline-actions view-toggle">
+                    <button
+                      type="button"
+                      className={`button ghost small ${state.directoryView === "list" ? "is-active" : ""}`}
+                      onClick={() => setState((prev) => ({ ...prev, directoryView: "list" }))}
+                    >
+                      List View
+                    </button>
+                    <button
+                      type="button"
+                      className={`button ghost small ${state.directoryView === "grid" ? "is-active" : ""}`}
+                      onClick={() => setState((prev) => ({ ...prev, directoryView: "grid" }))}
+                    >
+                      Grid View
+                    </button>
+                  </div>
                 </div>
-                <DirectoryTable employees={state.employees} />
+                {state.directoryView === "grid" ? <DirectoryGrid employees={state.employees} /> : <DirectoryTable employees={state.employees} />}
               </section>
             )}
 
@@ -2243,19 +2602,21 @@ function App() {
                       <div className="table-note">
                         {state.role === "Employee"
                           ? "Use the compact attendance pill near your profile photo to control check-in, pause, resume, and checkout."
-                          : "Review filtered attendance logs for the selected employee or month."}
+                          : "Review attendance logs by either a specific date or a selected month."}
                       </div>
                     </div>
                   </div>
                   <form
                     className="attendance-toolbar"
-                    key={`${state.attendanceFilter.employeeId}-${state.attendanceFilter.month}-${state.attendanceFilter.day}`}
+                    key={`${state.attendanceFilter.employeeId}-${state.attendanceFilter.mode}-${state.attendanceFilter.day}-${state.attendanceFilter.month}`}
                     onSubmit={(event) => {
                       event.preventDefault();
                       const values = Object.fromEntries(new FormData(event.currentTarget).entries());
+                      const mode = values.mode || "date";
                       loadAttendance({
-                        month: values.month || state.currentMonth,
-                        day: values.day || "",
+                        mode,
+                        day: mode === "date" ? values.day || "" : "",
+                        month: mode === "month" ? values.month || state.currentMonth : state.currentMonth,
                         employeeId: state.permissions.canViewAttendanceDirectory ? values.employeeId || visibleEmployeeId : state.me.id,
                       });
                     }}
@@ -2273,8 +2634,66 @@ function App() {
                           </select>
                         </label>
                       )}
-                      <label><span>Month</span><input type="month" name="month" defaultValue={state.attendanceFilter.month} /></label>
-                      <label><span>Specific Day</span><input type="date" name="day" defaultValue={state.attendanceFilter.day} /></label>
+                      <label>
+                        <span>View By</span>
+                        <select
+                          name="mode"
+                          value={state.attendanceFilter.mode}
+                          onChange={(event) =>
+                            setState((prev) => ({
+                              ...prev,
+                              attendanceFilter: {
+                                ...prev.attendanceFilter,
+                                mode: event.target.value,
+                                day: event.target.value === "date" ? (prev.attendanceFilter.day || prev.currentDate) : "",
+                                month: event.target.value === "month" ? (prev.attendanceFilter.month || prev.currentMonth) : prev.attendanceFilter.month,
+                              },
+                            }))
+                          }
+                        >
+                          <option value="date">Specific Date</option>
+                          <option value="month">Month</option>
+                        </select>
+                      </label>
+                      {state.attendanceFilter.mode === "month" ? (
+                        <label>
+                          <span>Month</span>
+                          <input
+                            type="month"
+                            name="month"
+                            value={state.attendanceFilter.month || state.currentMonth}
+                            onChange={(event) =>
+                              setState((prev) => ({
+                                ...prev,
+                                attendanceFilter: {
+                                  ...prev.attendanceFilter,
+                                  month: event.target.value,
+                                },
+                              }))
+                            }
+                            required
+                          />
+                        </label>
+                      ) : (
+                        <label>
+                          <span>Date</span>
+                          <input
+                            type="date"
+                            name="day"
+                            value={state.attendanceFilter.day || state.currentDate}
+                            onChange={(event) =>
+                              setState((prev) => ({
+                                ...prev,
+                                attendanceFilter: {
+                                  ...prev.attendanceFilter,
+                                  day: event.target.value,
+                                },
+                              }))
+                            }
+                            required
+                          />
+                        </label>
+                      )}
                     </div>
                     <div className="attendance-toolbar-actions">
                       <div className="toolbar">
@@ -2284,8 +2703,9 @@ function App() {
                           className="button ghost"
                           onClick={() =>
                             loadAttendance({
-                              month: state.currentMonth,
+                              mode: "date",
                               day: state.currentDate,
+                              month: state.currentMonth,
                               employeeId: state.permissions.canViewAttendanceDirectory ? visibleEmployeeId : state.me.id,
                             })
                           }
@@ -2297,8 +2717,9 @@ function App() {
                           className="button ghost"
                           onClick={() =>
                             loadAttendance({
-                              month: state.currentMonth,
+                              mode: "month",
                               day: "",
+                              month: state.currentMonth,
                               employeeId: state.permissions.canViewAttendanceDirectory ? visibleEmployeeId : state.me.id,
                             })
                           }
@@ -2310,9 +2731,10 @@ function App() {
                           className="button ghost"
                           onClick={() =>
                             loadAttendance({
+                              mode: state.attendanceFilter.mode || "date",
+                              day: state.attendanceFilter.mode === "date" ? state.currentDate : "",
                               month: state.currentMonth,
-                              day: "",
-                              employeeId: state.permissions.canViewAttendanceDirectory ? "" : state.me.id,
+                              employeeId: state.permissions.canViewAttendanceDirectory ? visibleEmployeeId : state.me.id,
                             })
                           }
                         >
@@ -2599,7 +3021,7 @@ function App() {
                               <td>{formatCurrency(payslip.deductions.totalDeductions)}</td>
                               <td>{formatCurrency(payslip.netPay)}</td>
                               <td><Tag value={payslip.status} /></td>
-                              <td><button className="button ghost small" onClick={() => triggerPayslipDownload(state.me.id, payslip.month)}>Download PDF</button></td>
+                              <td><button type="button" className="button ghost small" onClick={() => handlePreviewPayslip(state.me.id, payslip.month)}>Preview PDF</button></td>
                             </tr>
                           ))
                         ) : (
@@ -2752,7 +3174,12 @@ function App() {
                         className="hidden"
                         type="file"
                         accept="image/*"
-                        onChange={(event) => event.target.files?.[0] && handleProfilePhotoChange(event.target.files[0])}
+                        onChange={(event) => {
+                          if (event.target.files?.[0]) {
+                            handleProfilePhotoChange(event.target.files[0]);
+                          }
+                          event.target.value = "";
+                        }}
                       />
                       <div className="photo-actions-card">
                         <div>
@@ -2835,34 +3262,88 @@ function App() {
                   </section>
                 )}
                 {state.profileTab === "personal" && (
-                  <section className="panel">
-                    <div className="panel-actions">
-                      <div><span className="eyebrow">Edit Profile</span><h3>Keep your information up to date</h3></div>
-                    </div>
-                    <form
-                      key={state.me.id}
-                      className="form-grid two-col"
-                      onSubmit={(event) => {
-                        event.preventDefault();
-                        const values = Object.fromEntries(new FormData(event.currentTarget).entries());
-                        handleProfileSave(values);
-                      }}
-                    >
-                      <input type="hidden" name="id" value={state.me.id} />
-                      <input type="hidden" name="profilePhoto" value={state.me.profilePhoto || ""} readOnly />
-                      <input type="hidden" name="companyLogo" value={state.settings.companyLogo || ""} readOnly />
-                      <label><FieldLabel icon="user">Full Name</FieldLabel><input name="fullName" defaultValue={state.me.fullName} disabled={state.role === "Employee"} /></label>
-                      <label><FieldLabel icon="email">Email</FieldLabel><input name="email" defaultValue={state.me.email} disabled={state.role === "Employee"} /></label>
-                      <label><FieldLabel icon="phone">Phone</FieldLabel><input name="phone" defaultValue={state.me.phone || ""} /></label>
-                      <label><FieldLabel icon="emergency">Emergency Contact</FieldLabel><input name="emergencyContact" defaultValue={state.me.emergencyContact || ""} /></label>
-                      <label><FieldLabel icon="company">Company</FieldLabel><input name="companyName" defaultValue={state.me.companyName || ""} disabled={state.role !== "Admin"} /></label>
-                      <label><FieldLabel icon="location">Location</FieldLabel><input name="location" defaultValue={state.me.location || ""} /></label>
-                      <label><FieldLabel icon="department">Department</FieldLabel><input name="department" defaultValue={state.me.department || ""} disabled={state.role === "Employee"} /></label>
-                      <label><FieldLabel icon="manager">Manager</FieldLabel><input name="manager" defaultValue={state.me.manager || ""} disabled={!(state.role === "Admin" || state.role === "HR Officer")} /></label>
-                      <label className="two-col-span"><FieldLabel icon="address">Address</FieldLabel><textarea name="address" defaultValue={state.me.address || ""} /></label>
-                      <button type="submit" className="button primary">Save Profile</button>
-                    </form>
-                  </section>
+                  <>
+                    {state.role === "Admin" ? (
+                      <section className="panel company-settings-panel">
+                        <div className="panel-actions">
+                          <div>
+                            <span className="eyebrow">Company Details</span>
+                            <h3>Manage workspace identity</h3>
+                            <div className="table-note">Company name stays locked after setup. You can still refresh the company logo anytime.</div>
+                          </div>
+                        </div>
+                        <div className="company-settings-grid">
+                          <div className="company-logo-card">
+                          <div className="company-logo-preview">
+                            {state.settings.companyLogo ? (
+                              <img src={state.settings.companyLogo} alt={state.settings.companyName} />
+                            ) : (
+                              <HuremaLogo className="company-fallback-logo" />
+                            )}
+                          </div>
+                            <input
+                              ref={companyLogoInputRef}
+                              className="hidden"
+                              type="file"
+                              accept="image/*"
+                              onChange={(event) => {
+                                if (event.target.files?.[0]) {
+                                  handleCompanyLogoChange(event.target.files[0]);
+                                }
+                                event.target.value = "";
+                              }}
+                            />
+                            <div className="photo-actions-row">
+                              <button type="button" className="button ghost small" onClick={() => companyLogoInputRef.current?.click()}>
+                                {state.settings.companyLogo ? "Change Logo" : "Upload Logo"}
+                              </button>
+                              {state.settings.companyLogo ? (
+                                <button type="button" className="button ghost small danger-button" onClick={handleRemoveCompanyLogo}>
+                                  Remove
+                                </button>
+                              ) : null}
+                            </div>
+                          </div>
+                          <div className="company-meta-card">
+                            <label>
+                              <FieldLabel icon="company">Company Name</FieldLabel>
+                              <input value={state.settings.companyName || "Hurema"} disabled readOnly />
+                            </label>
+                            <div className="company-meta-note">
+                              This workspace name is fixed. Logo updates are reflected across the sidebar, profile, and payslip output.
+                            </div>
+                          </div>
+                        </div>
+                      </section>
+                    ) : null}
+                    <section className="panel">
+                      <div className="panel-actions">
+                        <div><span className="eyebrow">Edit Profile</span><h3>Keep your information up to date</h3></div>
+                      </div>
+                      <form
+                        key={state.me.id}
+                        className="form-grid two-col"
+                        onSubmit={(event) => {
+                          event.preventDefault();
+                          const values = Object.fromEntries(new FormData(event.currentTarget).entries());
+                          handleProfileSave(values);
+                        }}
+                      >
+                        <input type="hidden" name="id" value={state.me.id} />
+                        <input type="hidden" name="profilePhoto" value={state.me.profilePhoto || ""} readOnly />
+                        <label><FieldLabel icon="user">Full Name</FieldLabel><input name="fullName" defaultValue={state.me.fullName} disabled={state.role === "Employee"} /></label>
+                        <label><FieldLabel icon="email">Email</FieldLabel><input name="email" defaultValue={state.me.email} disabled={state.role === "Employee"} /></label>
+                        <label><FieldLabel icon="phone">Phone</FieldLabel><input name="phone" defaultValue={state.me.phone || ""} /></label>
+                        <label><FieldLabel icon="emergency">Emergency Contact</FieldLabel><input name="emergencyContact" defaultValue={state.me.emergencyContact || ""} /></label>
+                        <label><FieldLabel icon="location">Location</FieldLabel><input name="location" defaultValue={state.me.location || ""} /></label>
+                        <label><FieldLabel icon="department">Department</FieldLabel><input name="department" defaultValue={state.me.department || ""} disabled={state.role === "Employee"} /></label>
+                        <label><FieldLabel icon="manager">Manager</FieldLabel><input name="manager" defaultValue={state.me.manager || ""} disabled={!(state.role === "Admin" || state.role === "HR Officer")} /></label>
+                        <label><FieldLabel icon="company">Company</FieldLabel><input value={state.settings.companyName || "Hurema"} disabled readOnly /></label>
+                        <label className="two-col-span"><FieldLabel icon="address">Address</FieldLabel><textarea name="address" defaultValue={state.me.address || ""} /></label>
+                        <button type="submit" className="button primary">Save Profile</button>
+                      </form>
+                    </section>
+                  </>
                 )}
                 {state.profileTab === "salary" && (
                   <SalaryCard salaryInfo={currentSalaryStructure?.salaryInfo} title="My Salary Info" />
@@ -2967,7 +3448,19 @@ function App() {
                     </div>
                     <div className="report-actions">
                       <button type="submit" className="button primary">Load Report</button>
-                      <button type="button" className="button ghost" onClick={() => downloadExcel(`empay-${state.reportType}-${state.currentMonth}.xls`, state.report?.rows || [])}>Download Excel</button>
+                      {state.reportType === "attendance" ? (
+                        <button
+                          type="button"
+                          className="button ghost"
+                          onClick={state.reportView === "visualize" ? handleDownloadAttendanceReportPdf : () => downloadExcel(`hurema-${state.reportType}-${state.currentMonth}.xls`, state.report?.rows || [])}
+                        >
+                          {state.reportView === "visualize" ? "Download PDF" : "Download Excel"}
+                        </button>
+                      ) : (
+                        <button type="button" className="button ghost" onClick={() => downloadExcel(`hurema-${state.reportType}-${state.currentMonth}.xls`, state.report?.rows || [])}>
+                          Download Excel
+                        </button>
+                      )}
                     </div>
                   </form>
                 </section>
@@ -2978,39 +3471,65 @@ function App() {
                       <h3>{formatReportColumnLabel(state.reportType)} Report</h3>
                       <div className="table-note">{state.report?.rows?.length || 0} rows for {state.currentMonth}</div>
                     </div>
+                    <div className="inline-actions view-toggle">
+                      {state.reportType === "attendance" ? (
+                        <>
+                          <button
+                            type="button"
+                            className={`button ghost small ${state.reportView === "visualize" ? "is-active" : ""}`}
+                            onClick={() => setState((prev) => ({ ...prev, reportView: "visualize" }))}
+                          >
+                            Visualise
+                          </button>
+                          <button
+                            type="button"
+                            className={`button ghost small ${state.reportView === "detail" ? "is-active" : ""}`}
+                            onClick={() => setState((prev) => ({ ...prev, reportView: "detail" }))}
+                          >
+                            List Detail
+                          </button>
+                        </>
+                      ) : (
+                        null
+                      )}
+                    </div>
                   </div>
-                  <div className="table-wrap report-table-wrap">
-                    <table className="report-table">
-                      <thead>
-                        <tr>
-                          {(state.report?.rows?.[0] ? Object.keys(state.report.rows[0]) : []).map((column) => (
-                            <th className="report-col" key={column}>
-                              <span className="report-col-label">{formatReportColumnLabel(column)}</span>
-                            </th>
-                          ))}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {state.report?.rows?.length ? (
-                          state.report.rows.map((row, rowIndex) => (
-                            <tr key={rowIndex}>
-                              {Object.keys(row).map((column) => (
-                                <td className="report-cell" key={column}>
-                                  {formatReportCell(column, row[column])}
-                                </td>
-                              ))}
-                            </tr>
-                          ))
-                        ) : (
+                  {state.reportType === "attendance" && state.reportView === "visualize" ? (
+                    <AttendanceReportVisuals rows={state.report?.rows || []} month={state.currentMonth} />
+                  ) : (
+                    <div className="table-wrap report-table-wrap">
+                      <table className="report-table">
+                        <thead>
                           <tr>
-                            <td colSpan="1" className="empty-state">
-                              No data for the selected report.
-                            </td>
+                            {(state.report?.rows?.[0] ? Object.keys(state.report.rows[0]) : []).map((column) => (
+                              <th className="report-col" key={column}>
+                                <span className="report-col-label">{formatReportColumnLabel(column)}</span>
+                              </th>
+                            ))}
                           </tr>
-                        )}
-                      </tbody>
-                    </table>
-                  </div>
+                        </thead>
+                        <tbody>
+                          {state.report?.rows?.length ? (
+                            state.report.rows.map((row, rowIndex) => (
+                              <tr key={rowIndex}>
+                                {Object.keys(row).map((column) => (
+                                  <td className="report-cell" key={column}>
+                                    {formatReportCell(column, row[column])}
+                                  </td>
+                                ))}
+                              </tr>
+                            ))
+                          ) : (
+                            <tr>
+                              <td colSpan="1" className="empty-state">
+                                No data for the selected report.
+                              </td>
+                            </tr>
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
                 </section>
               </>
             )}
@@ -3049,9 +3568,116 @@ function App() {
           </section>
         </main>
       </section>
+      <PayslipPreviewModal preview={state.payslipPreview} onClose={closePayslipPreview} />
       <ToastViewport toasts={state.toasts} />
     </>
   );
 }
 
+function DirectoryGrid({ employees, onSelect, showAction = false }) {
+  return (
+    <div className="directory-grid">
+      {employees.map((employee) => (
+        <article key={employee.id} className="directory-card">
+          <div className="directory-card-head">
+            <div>
+              <strong>{employee.fullName}</strong>
+              <div className="muted">{employee.employeeId}</div>
+            </div>
+            <Tag value={employee.role} />
+          </div>
+          <div className="directory-card-copy">
+            <span>{employee.email}</span>
+            <span>{employee.department || "General"} - {employee.designation || employee.role}</span>
+          </div>
+          <div className="directory-card-stats">
+            <div>
+              <span className="eyebrow">Check In</span>
+              <strong>{formatTime(employee.attendanceSnapshot?.checkIn)}</strong>
+            </div>
+            <div>
+              <span className="eyebrow">Check Out</span>
+              <strong>{formatTime(employee.attendanceSnapshot?.checkOut)}</strong>
+            </div>
+            <div>
+              <span className="eyebrow">Worked</span>
+              <strong>{employee.attendanceSnapshot?.workedHours || 0} hrs</strong>
+            </div>
+            <div>
+              <span className="eyebrow">Status</span>
+              <Tag value={employee.attendanceSnapshot?.status || "No Record"} />
+            </div>
+          </div>
+          {showAction ? (
+            <div className="inline-actions">
+              <button type="button" className="button ghost small" onClick={() => onSelect(employee.id)}>
+                View
+              </button>
+            </div>
+          ) : null}
+        </article>
+      ))}
+    </div>
+  );
+}
+
+function AttendanceReportVisuals({ rows, month }) {
+  const palette = ["#8c6fb7", "#d9a13d", "#5b88d8", "#5ca38c", "#cf6b68", "#7987a6"];
+  const departmentTotals = Object.values(
+    rows.reduce((acc, row) => {
+      const key = row.department || "General";
+      if (!acc[key]) {
+        acc[key] = { label: key, value: 0, absent: 0, extra: 0, payable: 0, color: "" };
+      }
+      acc[key].value += Number(row.presentDays || 0);
+      acc[key].absent += Number(row.absentDays || 0);
+      acc[key].extra += Number(row.extraHours || 0);
+      acc[key].payable += Number(row.payableDays || 0);
+      return acc;
+    }, {})
+  );
+
+  const coloredDepartments = departmentTotals
+    .sort((left, right) => right.value - left.value)
+    .map((item, index) => ({
+      ...item,
+      color: palette[index % palette.length],
+    }));
+  const summaryCards = [
+    { label: "Employees", value: rows.length || 0, note: `${month} snapshot`, tone: "info" },
+    { label: "Present Days", value: rows.reduce((sum, row) => sum + Number(row.presentDays || 0), 0), note: "Across selected employees", tone: "success" },
+    { label: "Absent Days", value: rows.reduce((sum, row) => sum + Number(row.absentDays || 0), 0), note: "Across selected employees", tone: "danger" },
+    { label: "Extra Hours", value: rows.reduce((sum, row) => sum + Number(row.extraHours || 0), 0).toFixed(1), note: "Approved overtime hours", tone: "warning" },
+  ];
+
+  if (!rows.length) {
+    return (
+      <section className="panel chart-empty-panel">
+        <div>
+          <span className="eyebrow">Visualise</span>
+          <h3>No attendance data to chart</h3>
+          <div className="table-note">Load an attendance report for a month to see the visual breakdown and export it as a PDF with charts.</div>
+        </div>
+      </section>
+    );
+  }
+
+  return (
+    <div className="stack attendance-visual-stack">
+      <Metrics cards={summaryCards} />
+      <section className="dashboard-row split">
+        <DashboardBarChart title="Present days by department" subtitle="A colorful department view for the selected attendance period." items={coloredDepartments.map((item) => ({ label: item.label, value: item.value, color: item.color }))} />
+        <DashboardDonutChart title="Absence share by department" subtitle="Department contribution to total absences." items={coloredDepartments.map((item) => ({ label: item.label, value: item.absent, color: item.color }))} />
+      </section>
+      <section className="dashboard-row">
+        <DashboardHorizontalBars title="Payable days by department" subtitle="Payable days after attendance and leave adjustments." items={coloredDepartments.map((item) => ({ label: item.label, value: item.payable, color: item.color }))} />
+      </section>
+      <section className="dashboard-row">
+        <DashboardBarChart title="Extra hours by department" subtitle="Approved extra hours captured in the filtered report." items={coloredDepartments.map((item) => ({ label: item.label, value: item.extra, color: item.color }))} />
+      </section>
+    </div>
+  );
+}
+
 createRoot(document.getElementById("root")).render(<App />);
+

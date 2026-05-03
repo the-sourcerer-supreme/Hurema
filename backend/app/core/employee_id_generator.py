@@ -18,7 +18,7 @@ async def generate_employee_code(
     first_segment = _normalize_segment(first_name)
     last_segment = _normalize_segment(last_name)
     year = str(date_of_joining_year)
-    pattern = f"{prefix}{first_segment}{last_segment}{year}%"
+    pattern = f"{prefix}____{year}%"
 
     result = await session.execute(
         select(func.count()).select_from(User).where(User.employee_code.like(pattern))

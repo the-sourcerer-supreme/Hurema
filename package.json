@@ -1,8 +1,8 @@
 {
-  "name": "empay-smart-hrms",
+  "name": "hurema-hrms",
   "version": "1.0.0",
   "private": true,
-  "description": "EmPay Smart Human Resource Management System",
+  "description": "Hurema Human Resource Management System",
   "scripts": {
     "start": "powershell -ExecutionPolicy Bypass -File scripts/start.ps1",
     "build": "vite build",

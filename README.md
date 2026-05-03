@@ -1,6 +1,6 @@
-# EmPay HRMS
+# Hurema HRMS
 
-EmPay is a self-contained HRMS web app with:
+Hurema is a self-contained HRMS web app with:
 
 - role-based authentication
 - employee directory and profile management
@@ -34,6 +34,26 @@ Then open:
 - `http://127.0.0.1:8000`
 
 For frontend-only development, run `npm run dev` in the repo root. Vite proxies `/api` requests to the backend on port `8000`.
+
+## Deployment
+
+Recommended:
+
+- backend on Render
+- PostgreSQL on Render
+- frontend on Vercel
+
+Why:
+
+- the FastAPI backend handles auth cookies, PDF generation, uploads, and PostgreSQL access more naturally on Render
+- the Vite frontend deploys very smoothly on Vercel
+
+If you split deployment:
+
+- set `VITE_API_BASE_URL` in the frontend to your backend URL, for example `https://your-api.onrender.com`
+- set `CORS_ORIGINS` in the backend to include your Vercel domain and local development URLs
+
+If you want the simplest single deployment, you can also deploy the whole app on Render because the backend already serves the built frontend from `frontend/dist`.
 
 ## Demo Accounts
 

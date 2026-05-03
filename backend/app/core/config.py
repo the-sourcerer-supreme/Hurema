@@ -20,18 +20,22 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
 
     DEBUG: bool = False
-    APP_NAME: str = "EmPay HRMS Backend"
+    APP_NAME: str = "Hurema HRMS Backend"
     APP_VERSION: str = "1.0.0"
 
     CORS_ORIGINS: List[str] = ["http://localhost:3000", "http://localhost:5173", "http://localhost:8000"]
 
-    SMTP_SERVER: str = "smtp.gmail.com"
+    SMTP_SERVER: str = "smtp-relay.brevo.com"
     SMTP_PORT: int = 587
-    SMTP_USER: str = "your-email@gmail.com"
-    SMTP_PASSWORD: str = "your-email-password"
-    MAIL_FROM: str = "no-reply@empay.com"
-    MAIL_FROM_NAME: str = "EmPay HRMS"
+    SMTP_USER: str = ""
+    SMTP_PASSWORD: str = ""
+    MAIL_FROM: str = "no-reply@hurema.app"
+    MAIL_FROM_NAME: str = "Hurema HRMS"
     EMAILS_ENABLED: bool = False
+    BREVO_API_URL: str = "https://api.brevo.com/v3/smtp/email"
+    BREVO_API_KEY: str = ""
+    BREVO_SENDER_EMAIL: str = ""
+    BREVO_SENDER_NAME: str = "Hurema HRMS"
     
     class Config:
         env_file = str(DEFAULT_ENV_PATH)

@@ -11,11 +11,12 @@ from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
 from app.core.employee_id_generator import generate_employee_code
+from app.core.email_service import EmailService
 from app.core.security import create_access_token, decode_token, hash_password, verify_password
 from app.models.attendance import Attendance
 from app.models.audit_log import AuditLog
@@ -518,7 +519,7 @@ def _build_payslip_pdf(
     commands.append(_pdf_rect(page_left, 768, content_width, 54, fill=dark))
     commands.append(_pdf_rect(page_left, 740, content_width, 28, fill=gold))
     commands.append(_pdf_text("E", 66, 790, size=14, font="F2", color=white))
-    commands.append(_pdf_text("EmPay", 90, 790, size=18, font="F2", color=white))
+    commands.append(_pdf_text("Hurema", 90, 790, size=18, font="F2", color=white))
     commands.append(_pdf_text("SALARY STATEMENT", 448, 796, size=10, color=(0.70, 0.74, 0.82)))
     commands.append(_pdf_text(statement_month, 480, 780, size=18, font="F2", color=white))
     commands.append(_pdf_text(company_name, 62, 751, size=13, font="F2", color=dark))
@@ -655,13 +656,13 @@ def _build_payslip_pdf_themed(
     commands.append(_pdf_rect(page_left, 734, content_width, 28, fill=lilac))
     commands.append(_pdf_rect(page_left + 24, 780, 24, 24, fill=gold))
     commands.append(_pdf_text("E", page_left + 32, 787, size=13, font="F2", color=white))
-    commands.append(_pdf_text("EmPay", page_left + 58, 786, size=20, font="F2", color=white))
+    commands.append(_pdf_text("Hurema", page_left + 58, 786, size=20, font="F2", color=white))
     commands.append(_pdf_text("SALARY STATEMENT", page_right - 116, 796, size=10, color=(0.88, 0.85, 0.93)))
     commands.append(_pdf_text_right(statement_month, page_right - 24, 780, size=16, font="F2", color=white))
     commands.append(_pdf_text(company_name, page_left + 24, 744, size=13, font="F2", color=ink))
     commands.append(_pdf_text_right(company_code, page_right - 24, 744, size=11, font="F2", color=purple))
 
-    y = 690
+    y = 696
     detail_rows = [
         ("EMPLOYEE NAME", employee_name, "DATE OF JOINING", date_of_joining),
         ("DESIGNATION", designation, "SALARY EFFECTIVE FROM", salary_effective_from),
@@ -673,53 +674,53 @@ def _build_payslip_pdf_themed(
         commands.append(_pdf_text(left_value, left_col, y - 18, size=13, font="F2", color=ink))
         commands.append(_pdf_text(right_label, right_col, y, size=9.5, color=muted))
         commands.append(_pdf_text(right_value, right_col, y - 18, size=13, font="F2", color=ink))
-        y -= 52
+        y -= 42
 
     commands.append(_pdf_line(page_left, y + 8, page_right, y + 8, color=line))
     commands.append(_pdf_text("SALARY COMPONENTS", left_col, y - 18, size=9.5, color=muted))
     commands.append(_pdf_text_right("MONTHLY AMOUNT", monthly_col_right, y - 18, size=9.5, color=muted))
     commands.append(_pdf_text_right("YEARLY AMOUNT", yearly_col_right, y - 18, size=9.5, color=muted))
     commands.append(_pdf_line(left_col, y - 28, page_right - 24, y - 28, color=line_strong))
-    y -= 48
+    y -= 42
 
     gross_earnings = round(sum(item[1] for item in earnings_rows), 2)
     total_deductions = round(sum(item[1] for item in deduction_rows), 2)
 
     commands.append(_pdf_text("EARNINGS", left_col, y, size=12, font="F2", color=gold))
-    y -= 22
+    y -= 18
     for label, monthly_amount, yearly_amount in earnings_rows:
-        commands.append(_pdf_text(label, left_col, y, size=11.5, color=ink))
-        commands.append(_pdf_text_right(_currency_text(monthly_amount), monthly_col_right, y, size=11.5, color=ink))
-        commands.append(_pdf_text_right(_currency_text(yearly_amount), yearly_col_right, y, size=11.5, color=ink))
-        y -= 24
-        commands.append(_pdf_line(left_col, y + 8, page_right - 24, y + 8, color=line_soft))
+        commands.append(_pdf_text(label, left_col, y, size=11, color=ink))
+        commands.append(_pdf_text_right(_currency_text(monthly_amount), monthly_col_right, y, size=11, color=ink))
+        commands.append(_pdf_text_right(_currency_text(yearly_amount), yearly_col_right, y, size=11, color=ink))
+        y -= 18
+        commands.append(_pdf_line(left_col, y + 6, page_right - 24, y + 6, color=line_soft))
     commands.append(_pdf_text("Gross earnings", left_col, y - 2, size=11.5, font="F2", color=ink))
     commands.append(_pdf_text_right(_currency_text(gross_earnings), monthly_col_right, y - 2, size=11.5, font="F2", color=ink))
     commands.append(_pdf_text_right(_currency_text(gross_earnings * 12), yearly_col_right, y - 2, size=11.5, font="F2", color=ink))
 
-    y -= 34
+    y -= 24
     commands.append(_pdf_text("DEDUCTIONS", left_col, y, size=12, font="F2", color=purple))
-    y -= 22
+    y -= 18
     for label, monthly_amount, yearly_amount in deduction_rows:
-        commands.append(_pdf_text(label, left_col, y, size=11.5, color=ink))
-        commands.append(_pdf_text_right(_currency_text(monthly_amount), monthly_col_right, y, size=11.5, color=ink))
-        commands.append(_pdf_text_right(_currency_text(yearly_amount), yearly_col_right, y, size=11.5, color=ink))
-        y -= 24
-        commands.append(_pdf_line(left_col, y + 8, page_right - 24, y + 8, color=line_soft))
+        commands.append(_pdf_text(label, left_col, y, size=11, color=ink))
+        commands.append(_pdf_text_right(_currency_text(monthly_amount), monthly_col_right, y, size=11, color=ink))
+        commands.append(_pdf_text_right(_currency_text(yearly_amount), yearly_col_right, y, size=11, color=ink))
+        y -= 18
+        commands.append(_pdf_line(left_col, y + 6, page_right - 24, y + 6, color=line_soft))
     commands.append(_pdf_text("Total deductions", left_col, y - 2, size=11.5, font="F2", color=ink))
     commands.append(_pdf_text_right(_currency_text(total_deductions), monthly_col_right, y - 2, size=11.5, font="F2", color=ink))
     commands.append(_pdf_text_right(_currency_text(total_deductions * 12), yearly_col_right, y - 2, size=11.5, font="F2", color=ink))
 
-    y -= 38
+    y -= 22
     commands.append(_pdf_line(left_col, y, page_right - 24, y, width=1.2, color=purple))
-    y -= 30
+    y -= 24
     commands.append(_pdf_text("Net salary", left_col, y, size=15, font="F2", color=ink))
     commands.append(_pdf_text_right("MONTHLY", monthly_col_right, y + 18, size=9, color=muted))
     commands.append(_pdf_text_right("YEARLY", yearly_col_right, y + 18, size=9, color=muted))
     commands.append(_pdf_text_right(_currency_text(net_salary_monthly), monthly_col_right, y, size=16, font="F2", color=gold))
     commands.append(_pdf_text_right(_currency_text(net_salary_yearly), yearly_col_right, y, size=16, font="F2", color=ink))
 
-    y -= 42
+    y -= 34
     commands.append(_pdf_rect(left_col, y - 18, 470, 42, fill=purple_soft))
     commands.append(_pdf_rect(left_col, y - 18, 3, 42, fill=purple))
     commands.append(_pdf_text("AMOUNT IN WORDS", left_col + 14, y + 8, size=9, color=muted))
@@ -727,9 +728,147 @@ def _build_payslip_pdf_themed(
 
     commands.append(_pdf_line(page_left, 94, page_right, 94, color=line))
     commands.append(_pdf_text("This is a system-generated payslip and does not require a signature.", left_col, 68, size=9.5, color=muted))
-    commands.append(_pdf_text(f"Generated by EmPay HRMS - {generated_on}", left_col, 50, size=9.5, color=muted))
+    commands.append(_pdf_text(f"Generated by Hurema HRMS - {generated_on}", left_col, 50, size=9.5, color=muted))
     commands.append(_pdf_line(462, 50, 536, 50, color=line))
     commands.append(_pdf_text("Authorised signatory", 444, 34, size=9.5, color=muted))
+    return _build_pdf(commands)
+
+
+def _build_attendance_report_pdf(*, company_name: str, report_month: str, rows: list[dict[str, Any]]) -> bytes:
+    commands: list[str] = []
+    ink = (0.13, 0.16, 0.24)
+    purple = (0.45, 0.34, 0.53)
+    muted = (0.39, 0.45, 0.56)
+    lilac = (0.94, 0.92, 0.97)
+    white = (1.0, 1.0, 1.0)
+    line = (0.84, 0.87, 0.92)
+    line_soft = (0.92, 0.94, 0.97)
+    page_left = 36
+    page_right = 559
+    content_width = page_right - page_left
+    left_col = page_left + 24
+    chart_palette = [
+        (0.55, 0.43, 0.72),
+        (0.88, 0.63, 0.23),
+        (0.36, 0.55, 0.85),
+        (0.35, 0.64, 0.50),
+        (0.83, 0.42, 0.36),
+        (0.50, 0.56, 0.66),
+    ]
+
+    total_present = round(sum(_safe_float(row.get("presentDays")) for row in rows), 2)
+    total_absent = round(sum(_safe_float(row.get("absentDays")) for row in rows), 2)
+    total_payable = round(sum(_safe_float(row.get("payableDays")) for row in rows), 2)
+    total_extra = round(sum(_safe_float(row.get("extraHours")) for row in rows), 2)
+    department_map: dict[str, dict[str, float | str]] = {}
+    for row in rows:
+        label = str(row.get("department") or "General")
+        entry = department_map.setdefault(label, {"label": label, "present": 0.0, "absent": 0.0, "payable": 0.0, "extra": 0.0})
+        entry["present"] = float(entry["present"]) + _safe_float(row.get("presentDays"))
+        entry["absent"] = float(entry["absent"]) + _safe_float(row.get("absentDays"))
+        entry["payable"] = float(entry["payable"]) + _safe_float(row.get("payableDays"))
+        entry["extra"] = float(entry["extra"]) + _safe_float(row.get("extraHours"))
+    department_rows = sorted(department_map.values(), key=lambda item: float(item["present"]), reverse=True)[:5]
+
+    commands.append(_pdf_rect(page_left, 36, content_width, 786, fill=white, stroke=line, line_width=1.1))
+    commands.append(_pdf_rect(page_left, 762, content_width, 60, fill=purple))
+    commands.append(_pdf_rect(page_left, 734, content_width, 28, fill=lilac))
+    commands.append(_pdf_text("Hurema", left_col, 786, size=20, font="F2", color=white))
+    commands.append(_pdf_text("ATTENDANCE REPORT", page_right - 150, 796, size=10, color=(0.89, 0.85, 0.94)))
+    commands.append(_pdf_text_right(report_month, page_right - 24, 780, size=16, font="F2", color=white))
+    commands.append(_pdf_text(company_name, left_col, 744, size=13, font="F2", color=ink))
+
+    summary_y = 682
+    summary_cards = [
+        ("Employees", str(len(rows)), "Included in this report"),
+        ("Present Days", str(int(total_present)), "Across selected employees"),
+        ("Absent Days", str(int(total_absent)), "Across selected employees"),
+        ("Extra Hours", f"{total_extra:.1f}", "Approved overtime hours"),
+    ]
+    card_width = 116
+    card_gap = 12
+    for index, (label, value, note) in enumerate(summary_cards):
+        card_x = left_col + index * (card_width + card_gap)
+        commands.append(_pdf_rect(card_x, summary_y - 34, card_width, 54, fill=lilac, stroke=line_soft))
+        commands.append(_pdf_text(label.upper(), card_x + 10, summary_y + 8, size=8.5, color=muted))
+        commands.append(_pdf_text(value, card_x + 10, summary_y - 8, size=16, font="F2", color=ink))
+        commands.append(_pdf_text(note, card_x + 10, summary_y - 24, size=7.8, color=muted))
+
+    chart_top = 610
+    chart_bottom = 448
+    left_chart_x = left_col
+    left_chart_width = 250
+    right_chart_x = 328
+    right_chart_width = 190
+    commands.append(_pdf_text("PRESENT DAYS BY DEPARTMENT", left_chart_x, chart_top, size=9.5, color=muted))
+    commands.append(_pdf_text("PAYABLE DAYS BY DEPARTMENT", right_chart_x, chart_top, size=9.5, color=muted))
+    commands.append(_pdf_rect(left_chart_x, chart_bottom, left_chart_width, 140, fill=(0.985, 0.982, 0.995), stroke=line_soft))
+    commands.append(_pdf_rect(right_chart_x, chart_bottom, right_chart_width, 140, fill=(0.985, 0.982, 0.995), stroke=line_soft))
+
+    max_present = max([float(item["present"]) for item in department_rows], default=1.0)
+    bar_width = 30
+    bar_gap = 16
+    base_y = chart_bottom + 18
+    usable_height = 96
+    for index, item in enumerate(department_rows):
+        color = chart_palette[index % len(chart_palette)]
+        bar_height = usable_height * (float(item["present"]) / max_present) if max_present else 0
+        x = left_chart_x + 18 + index * (bar_width + bar_gap)
+        commands.append(_pdf_rect(x, base_y, bar_width, bar_height, fill=color))
+        commands.append(_pdf_text_right(str(int(round(float(item["present"])))), x + bar_width, base_y + bar_height + 10, size=8.5, color=ink))
+        commands.append(_pdf_text(str(item["label"])[:8], x - 2, chart_bottom + 6, size=7.5, color=muted))
+
+    max_payable = max([float(item["payable"]) for item in department_rows], default=1.0)
+    for index, item in enumerate(department_rows):
+        color = chart_palette[index % len(chart_palette)]
+        row_y = chart_top - 24 - index * 24
+        commands.append(_pdf_text(str(item["label"])[:10], right_chart_x + 10, row_y, size=8.5, color=ink))
+        commands.append(_pdf_rect(right_chart_x + 70, row_y - 8, 98, 10, fill=(0.94, 0.93, 0.97)))
+        fill_width = 98 * (float(item["payable"]) / max_payable) if max_payable else 0
+        commands.append(_pdf_rect(right_chart_x + 70, row_y - 8, fill_width, 10, fill=color))
+        commands.append(_pdf_text_right(str(int(round(float(item["payable"])))), right_chart_x + right_chart_width - 10, row_y, size=8.5, font="F2", color=ink))
+
+    legend_y = 418
+    for index, item in enumerate(department_rows):
+        color = chart_palette[index % len(chart_palette)]
+        legend_x = left_col + (index % 3) * 156
+        current_y = legend_y - (index // 3) * 16
+        commands.append(_pdf_rect(legend_x, current_y, 8, 8, fill=color))
+        commands.append(_pdf_text(str(item["label"]), legend_x + 14, current_y, size=8.5, color=muted))
+
+    y = 374
+    commands.append(_pdf_text("EMPLOYEE", left_col, y, size=9.5, color=muted))
+    commands.append(_pdf_text("DEPARTMENT", 252, y, size=9.5, color=muted))
+    commands.append(_pdf_text_right("PRESENT", 392, y, size=9.5, color=muted))
+    commands.append(_pdf_text_right("ABSENT", 450, y, size=9.5, color=muted))
+    commands.append(_pdf_text_right("PAYABLE", 508, y, size=9.5, color=muted))
+    commands.append(_pdf_text_right("EXTRA", page_right - 24, y, size=9.5, color=muted))
+    commands.append(_pdf_line(left_col, y - 10, page_right - 24, y - 10, color=line))
+    y -= 28
+
+    visible_rows = rows[:10]
+    for row in visible_rows:
+        commands.append(_pdf_text(str(row.get("employeeName", "-")), left_col, y, size=10.5, font="F2", color=ink))
+        commands.append(_pdf_text(str(row.get("department", "General")), 252, y, size=10.5, color=ink))
+        commands.append(_pdf_text_right(str(int(_safe_float(row.get("presentDays")))), 392, y, size=10.5, color=ink))
+        commands.append(_pdf_text_right(str(int(_safe_float(row.get("absentDays")))), 450, y, size=10.5, color=ink))
+        commands.append(_pdf_text_right(str(int(_safe_float(row.get("payableDays")))), 508, y, size=10.5, color=ink))
+        commands.append(_pdf_text_right(f"{_safe_float(row.get('extraHours')):.1f}", page_right - 24, y, size=10.5, color=ink))
+        y -= 18
+        commands.append(_pdf_line(left_col, y + 8, page_right - 24, y + 8, color=line_soft))
+
+    commands.append(_pdf_text("TOTAL", left_col, y - 2, size=11, font="F2", color=ink))
+    commands.append(_pdf_text_right(str(int(total_present)), 392, y - 2, size=11, font="F2", color=ink))
+    commands.append(_pdf_text_right(str(int(total_absent)), 450, y - 2, size=11, font="F2", color=ink))
+    commands.append(_pdf_text_right(str(int(total_payable)), 508, y - 2, size=11, font="F2", color=ink))
+    commands.append(_pdf_text_right(f"{total_extra:.1f}", page_right - 24, y - 2, size=11, font="F2", color=ink))
+
+    if len(rows) > len(visible_rows):
+        commands.append(_pdf_text(f"Showing first {len(visible_rows)} of {len(rows)} employees in this PDF summary.", left_col, 122, size=9.5, color=muted))
+
+    commands.append(_pdf_line(page_left, 94, page_right, 94, color=line))
+    commands.append(_pdf_text("This attendance report is generated from the current Hurema workspace data.", left_col, 68, size=9.5, color=muted))
+    commands.append(_pdf_text(f"Generated on {datetime.now().strftime('%d %B %Y')}", left_col, 50, size=9.5, color=muted))
     return _build_pdf(commands)
 
 
@@ -737,7 +876,7 @@ async def _get_company(session: AsyncSession) -> CompanySetting:
     result = await session.execute(select(CompanySetting).limit(1))
     company = result.scalar_one_or_none()
     if company is None:
-        company = CompanySetting(company_name="EmPay")
+        company = CompanySetting(company_name="Hurema")
         session.add(company)
         await session.commit()
         await session.refresh(company)
@@ -1059,12 +1198,23 @@ async def auth_me(request: Request, session: AsyncSession = Depends(get_db)):
 @router.post("/auth/login")
 async def login(payload: dict[str, Any], request: Request, session: AsyncSession = Depends(get_db)):
     _enforce_auth_rate_limit(request, "login")
+    identifier = str(payload.get("identifier", payload.get("email", ""))).strip()
+    if not identifier:
+        _register_attempt(request, "login")
+        raise HTTPException(status_code=401, detail="Invalid email, login ID, or password.")
     user = (
-        await session.execute(select(User).where(User.email == str(payload.get("email", "")).strip().lower()))
+        await session.execute(
+            select(User).where(
+                or_(
+                    User.email == identifier.lower(),
+                    User.employee_code == identifier.upper(),
+                )
+            )
+        )
     ).scalar_one_or_none()
     if user is None or not verify_password(str(payload.get("password", "")), user.hashed_password):
         _register_attempt(request, "login")
-        raise HTTPException(status_code=401, detail="Invalid email or password.")
+        raise HTTPException(status_code=401, detail="Invalid email, login ID, or password.")
     csrf_token = secrets.token_urlsafe(32)
     token = create_access_token({"sub": user.email, "user_id": user.id, "role": user.role, "csrf": csrf_token})
     _clear_attempts(request, "login")
@@ -1211,14 +1361,15 @@ async def create_employee(
     full_name = str(payload.get("fullName", "")).strip()
     first_name, last_name = _split_name(full_name)
     email = str(payload.get("email", "")).strip().lower()
+    joining_date = date.fromisoformat(str(payload["dateOfJoining"])) if payload.get("dateOfJoining") else date.today()
     existing = await session.execute(select(User).where(User.email == email))
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="A user with this email already exists.")
-    employee_code = str(payload.get("employeeId", "")).strip() or await generate_employee_code(
+    employee_code = await generate_employee_code(
         session,
         first_name,
         last_name,
-        date.today().year,
+        joining_date.year,
     )
     user = User(
         employee_code=employee_code,
@@ -1229,7 +1380,7 @@ async def create_employee(
         role=_validate_role(str(payload.get("role", "Employee"))),
         department=str(payload.get("department", "General")) or "General",
         designation=str(payload.get("designation", "Team Member")) or "Team Member",
-        date_of_joining=date.fromisoformat(str(payload["dateOfJoining"])) if payload.get("dateOfJoining") else date.today(),
+        date_of_joining=joining_date,
         location=str(payload.get("location", "Bengaluru")).strip() or "Bengaluru",
         is_active=True,
         is_first_login=False,
@@ -1252,8 +1403,24 @@ async def create_employee(
         session.add(LeaveBalance(user_id=user.id, leave_type_id=leave_type.id, balance=leave_type.default_balance))
     session.add(SalaryStructure(user_id=user.id, month_wage=_safe_float(payload.get("monthWage"), 50000.0)))
     await session.commit()
+
+    company = await _get_company(session)
+    credentials_sent = await EmailService.send_credentials(
+        email=user.email,
+        employee_code=user.employee_code,
+        temporary_password=str(payload.get("password", "")),
+        company_name=company.company_name,
+    )
+    session.add(EmailLog(user_id=user.id, email=user.email, credential_sent=credentials_sent))
+    await session.commit()
+
     await _log_action(session, current_user.id, f"Created {user.role}", "user", user.employee_code)
-    return {"ok": True}
+    return {
+        "ok": True,
+        "emailSent": credentials_sent,
+        "employeeId": user.employee_code,
+        "message": "User created and credentials emailed." if credentials_sent else "User created but credential email could not be sent.",
+    }
 
 
 @router.put("/employees/{user_id}")
@@ -1326,12 +1493,9 @@ async def update_employee(
         profile.emergency_contact = str(payload.get("emergencyContact", ""))
     if payload.get("manager") is not None:
         profile.manager_name = str(payload.get("manager", ""))
-    if current_user.role == "Admin" and (payload.get("companyName") is not None or payload.get("companyLogo") is not None):
+    if current_user.role == "Admin" and payload.get("companyLogo") is not None:
         company = await _get_company(session)
-        if payload.get("companyName") is not None:
-            company.company_name = str(payload.get("companyName"))
-        if payload.get("companyLogo") is not None:
-            company.company_logo = _validate_company_logo(str(payload.get("companyLogo", "")))
+        company.company_logo = _validate_company_logo(str(payload.get("companyLogo", "")))
 
     await session.commit()
     await _log_action(session, current_user.id, "Updated user profile", "user", target_user.employee_code)
@@ -2314,7 +2478,7 @@ async def download_payslip(
         net_salary_yearly=round(payroll.net_salary * 12, 2),
         generated_on=datetime.now().strftime("%d %B %Y"),
     )
-    filename = f"empay-payslip-{employee.employee_code}-{month}.pdf"
+    filename = f"hurema-payslip-{employee.employee_code}-{month}.pdf"
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
@@ -2373,6 +2537,31 @@ async def reports(
             ]
         }
     raise HTTPException(status_code=400, detail="Unsupported report type.")
+
+
+@router.get("/reports/attendance-pdf")
+async def attendance_report_pdf(
+    request: Request,
+    month: str | None = Query(None),
+    session: AsyncSession = Depends(get_db),
+):
+    current_user = await _get_session_user(request, session)
+    if current_user.role not in DIRECTORY_ROLES:
+        raise HTTPException(status_code=403, detail="You do not have access to reports.")
+    company = await _get_company(session)
+    report_rows = (await reports(request=request, type="attendance", month=month, session=session))["rows"]
+    report_month = _month_label(month or date.today().strftime("%Y-%m"))
+    pdf_bytes = _build_attendance_report_pdf(
+        company_name=company.company_name,
+        report_month=report_month,
+        rows=report_rows,
+    )
+    filename = f"hurema-attendance-report-{(month or date.today().strftime('%Y-%m'))}.pdf"
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.get("/audit-logs")

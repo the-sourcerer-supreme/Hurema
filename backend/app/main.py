@@ -36,7 +36,7 @@ def create_app() -> FastAPI:
 
     app = FastAPI(
         title=settings.APP_NAME,
-        description="EmPay HRMS + Payroll backend API",
+        description="Hurema HRMS + Payroll backend API",
         version=settings.APP_VERSION,
         lifespan=lifespan,
     )
@@ -78,7 +78,7 @@ def create_app() -> FastAPI:
         if frontend_dist.exists():
             return FileResponse(frontend_dist / "index.html")
         return {
-            "message": "Welcome to EmPay HRMS Backend",
+            "message": "Welcome to Hurema HRMS Backend",
             "version": settings.APP_VERSION,
             "docs": "/docs",
             "openapi": "/openapi.json",
