@@ -67,3 +67,6 @@ If you want the simplest single deployment, you can also deploy the whole app on
 - The default local setup uses PostgreSQL via `DATABASE_URL` in `backend/.env`.
 - Demo data is seeded automatically on first run.
 - The backend serves the built frontend from `frontend/dist`.
+
+##Link
+YT video : https://youtu.be/yOed0FNvE-Y?si=3LMBESDoHiV3Rr4P
