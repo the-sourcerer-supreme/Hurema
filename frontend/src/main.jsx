@@ -1,18 +1,64 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "../styles.css";
 
+const MAX_PROFILE_PHOTO_BYTES = 2 * 1024 * 1024;
+const THEME_OPTIONS = [
+  { id: "professional", name: "Professional", note: "Calm blue-grey for daily ERP work." },
+  { id: "relaxed", name: "Purple", note: "Classic mauve palette for a softer workspace tone." },
+  { id: "bright", name: "Bright", note: "Clear daylight palette for high-visibility work." },
+  { id: "midnight", name: "Midnight", note: "Dark focus mode for long working sessions." },
+];
+
+function localDateKey(dateLike = new Date()) {
+  const value = dateLike instanceof Date ? dateLike : new Date(dateLike);
+  if (Number.isNaN(value.getTime())) {
+    return "1970-01-01";
+  }
+  const year = value.getFullYear();
+  const month = String(value.getMonth() + 1).padStart(2, "0");
+  const day = String(value.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function localTimeKey(dateLike = new Date()) {
+  const value = dateLike instanceof Date ? dateLike : new Date(dateLike);
+  if (Number.isNaN(value.getTime())) {
+    return "09:00";
+  }
+  const hours = String(value.getHours()).padStart(2, "0");
+  const minutes = String(value.getMinutes()).padStart(2, "0");
+  return `${hours}:${minutes}`;
+}
+
+function serverDateKey(value, fallback = localDateKey()) {
+  const match = String(value || "").match(/^(\d{4}-\d{2}-\d{2})/);
+  return match?.[1] || fallback;
+}
+
+function normalizeQuickAttendance(record, currentDate) {
+  if (!record || record.date !== currentDate) {
+    return null;
+  }
+  return record;
+}
+
 function createInitialState() {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = localDateKey();
   const month = today.slice(0, 7);
   return {
     screen: "public",
     authMode: "login",
     status: { message: "", type: "info" },
     profileMenuOpen: false,
+    csrfToken: "",
+    toasts: [],
+    profileTab: "resume",
+    manageUserModalId: null,
     me: null,
     role: null,
-    settings: { companyName: "EmPay" },
+    theme: "professional",
+    settings: { companyName: "EmPay", companyLogo: "" },
     permissions: {},
     view: "dashboard",
     dashboard: null,
@@ -28,6 +74,8 @@ function createInitialState() {
     auditLogs: [],
     selectedUserId: null,
     quickAttendance: null,
+    attendancePillBusy: false,
+    serverNow: today,
     currentMonth: month,
     currentDate: today,
     attendanceFilter: { month, day: "", employeeId: "" },
@@ -38,15 +86,15 @@ function createInitialState() {
 }
 
 const viewConfig = {
-  dashboard: { label: "Dashboard", roles: ["Admin", "Employee", "HR Officer", "Payroll Officer"] },
-  manageUsers: { label: "Manage Users", roles: ["Admin"] },
-  people: { label: "People Directory", roles: ["HR Officer", "Payroll Officer"] },
-  attendance: { label: "Attendance", roles: ["Admin", "Employee", "HR Officer", "Payroll Officer"] },
-  leave: { label: "Leave", roles: ["Admin", "Employee", "HR Officer", "Payroll Officer"] },
-  payroll: { label: "Payroll", roles: ["Admin", "Employee", "Payroll Officer"] },
-  reports: { label: "Reports", roles: ["Admin", "HR Officer", "Payroll Officer"] },
-  profile: { label: "My Profile", roles: ["Admin", "Employee", "HR Officer", "Payroll Officer"] },
-  audit: { label: "Audit Log", roles: ["Admin"] },
+  dashboard: { label: "Dashboard", icon: "home", roles: ["Admin", "Employee", "HR Officer", "Payroll Officer"] },
+  manageUsers: { label: "Manage Users", icon: "users", roles: ["Admin"] },
+  people: { label: "People Directory", icon: "directory", roles: ["HR Officer", "Payroll Officer"] },
+  attendance: { label: "Attendance", icon: "clock", roles: ["Admin", "Employee", "HR Officer", "Payroll Officer"] },
+  leave: { label: "Leave", icon: "calendar", roles: ["Admin", "Employee", "HR Officer", "Payroll Officer"] },
+  payroll: { label: "Payroll", icon: "wallet", roles: ["Admin", "Employee", "Payroll Officer"] },
+  reports: { label: "Reports", icon: "chart", roles: ["Admin", "HR Officer", "Payroll Officer"] },
+  profile: { label: "My Profile", icon: "profile", roles: ["Admin", "Employee", "HR Officer", "Payroll Officer"] },
+  audit: { label: "Audit Log", icon: "shield", roles: ["Admin"] },
 };
 
 function query(params) {
@@ -59,18 +107,52 @@ function query(params) {
   return search.toString();
 }
 
+function sanitizeValues(values) {
+  return Object.fromEntries(
+    Object.entries(values).map(([key, value]) => [
+      key,
+      typeof value === "string" ? value.trim() : value,
+    ])
+  );
+}
+
+function makeToastId() {
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function validatePasswordStrength(password) {
+  const value = String(password || "");
+  if (value.length < 12) {
+    return "Password must be at least 12 characters long.";
+  }
+  if (!/[a-z]/.test(value) || !/[A-Z]/.test(value) || !/\d/.test(value) || !/[^A-Za-z0-9]/.test(value)) {
+    return "Password must include uppercase, lowercase, number, and special character.";
+  }
+  return "";
+}
+
 async function api(path, options = {}) {
+  const { csrfToken = "", ...fetchOptions } = options;
+  const method = String(fetchOptions.method || "GET").toUpperCase();
+  const headers = {
+    ...(fetchOptions.headers || {}),
+  };
+  if (fetchOptions.body !== undefined && fetchOptions.body !== null && !headers["Content-Type"]) {
+    headers["Content-Type"] = "application/json";
+  }
+  if (csrfToken && ["POST", "PUT", "PATCH", "DELETE"].includes(method)) {
+    headers["X-CSRF-Token"] = csrfToken;
+  }
   const response = await fetch(path, {
-    headers: {
-      "Content-Type": "application/json",
-      ...(options.headers || {}),
-    },
-    ...options,
+    credentials: "include",
+    method,
+    headers,
+    ...fetchOptions,
   });
   const contentType = response.headers.get("content-type") || "";
   const payload = contentType.includes("application/json") ? await response.json() : null;
   if (!response.ok) {
-    throw new Error(payload?.error || "Request failed");
+    throw new Error(payload?.error || payload?.detail || "Request failed");
   }
   return payload;
 }
@@ -148,21 +230,27 @@ function formatReportCell(column, value) {
   return String(value);
 }
 
-function toCsv(rows) {
+function downloadExcel(filename, rows) {
   if (!rows.length) {
-    return "";
+    return;
   }
   const headers = Object.keys(rows[0]);
-  return [
-    headers.join(","),
-    ...rows.map((row) =>
-      headers.map((header) => `"${String(row[header] ?? "").replaceAll('"', '""')}"`).join(",")
+  const table = [
+    "<table>",
+    "<thead><tr>",
+    ...headers.map((header) => `<th>${formatReportColumnLabel(header)}</th>`),
+    "</tr></thead>",
+    "<tbody>",
+    ...rows.map(
+      (row) =>
+        `<tr>${headers
+          .map((header) => `<td>${String(formatReportCell(header, row[header])).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")}</td>`)
+          .join("")}</tr>`
     ),
-  ].join("\n");
-}
-
-function downloadCsv(filename, rows) {
-  const blob = new Blob([toCsv(rows)], { type: "text/csv;charset=utf-8" });
+    "</tbody></table>",
+  ].join("");
+  const content = `<!DOCTYPE html><html><head><meta charset="utf-8" /></head><body>${table}</body></html>`;
+  const blob = new Blob([content], { type: "application/vnd.ms-excel;charset=utf-8" });
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url;
@@ -175,8 +263,57 @@ function triggerPayslipDownload(employeeId, month) {
   window.open(`/api/payslips/download?${query({ employeeId, month })}`, "_blank");
 }
 
+function formatTimer(totalSeconds) {
+  const safeSeconds = Math.max(Math.floor(Number(totalSeconds || 0)), 0);
+  const hours = String(Math.floor(safeSeconds / 3600)).padStart(2, "0");
+  const minutes = String(Math.floor((safeSeconds % 3600) / 60)).padStart(2, "0");
+  const seconds = String(safeSeconds % 60).padStart(2, "0");
+  return `${hours}:${minutes}:${seconds}`;
+}
+
+function attendanceActionState(record) {
+  if (!record?.checkIn && !record?.currentSessionStart) {
+    return { tone: "idle", label: "Check-in" };
+  }
+  if (record?.pauseStartedAt) {
+    return { tone: "paused", label: "Resume" };
+  }
+  if (record?.currentSessionStart) {
+    return { tone: "active", label: "Pause" };
+  }
+  if (record?.checkOut) {
+    return { tone: "done", label: "Check-in" };
+  }
+  return { tone: "idle", label: "Check-in" };
+}
+
+function attendanceElapsedSeconds(record, nowValue) {
+  if (!record?.checkIn && !record?.currentSessionStart) {
+    return 0;
+  }
+  if (!record?.currentSessionStart) {
+    return Math.max(Math.floor(Number(record.workedHours || 0) * 3600), 0);
+  }
+  const sessionStartTime = new Date(record.currentSessionStart).getTime();
+  const accumulatedSeconds = Math.max(Number(record.accumulatedHours || 0) * 3600, 0);
+  const pausedBaseSeconds = Math.max(Number(record.pausedMinutes || 0) * 60, 0);
+  const currentPausedSeconds = record.pauseStartedAt
+    ? Math.max((nowValue - new Date(record.pauseStartedAt).getTime()) / 1000, 0)
+    : 0;
+  const liveSeconds = Math.max((nowValue - sessionStartTime) / 1000 - pausedBaseSeconds - currentPausedSeconds, 0);
+  return Math.max(Math.floor(accumulatedSeconds + liveSeconds), 0);
+}
+
 function readFileAsDataUrl(file) {
   return new Promise((resolve, reject) => {
+    if (!file?.type?.startsWith("image/")) {
+      reject(new Error("Please upload an image file."));
+      return;
+    }
+    if (file.size > MAX_PROFILE_PHOTO_BYTES) {
+      reject(new Error("Profile photo must be smaller than 2 MB."));
+      return;
+    }
     const reader = new FileReader();
     reader.onload = () => resolve(String(reader.result || ""));
     reader.onerror = reject;
@@ -190,21 +327,189 @@ function Tag({ value }) {
 
 function Metrics({ cards }) {
   return (
-    <section className="metrics-grid">
+    <section className="metrics-grid dashboard-metrics-grid">
       {cards.map((card) => (
-        <article className="metric-card" key={card.label}>
+        <article className={`metric-card dashboard-metric-card ${card.tone || ""}`} key={card.label}>
           <span className="eyebrow">{card.label}</span>
           <strong>{card.value}</strong>
+          {card.note ? <div className={`dashboard-metric-note ${card.tone || ""}`}>{card.note}</div> : null}
         </article>
       ))}
     </section>
   );
 }
 
+function DashboardPanel({ title, children, subtitle = "", className = "" }) {
+  return (
+    <article className={`dashboard-panel ${className}`.trim()}>
+      <div className="dashboard-panel-head">
+        <div>
+          <span className="eyebrow">{title}</span>
+          {subtitle ? <p>{subtitle}</p> : null}
+        </div>
+      </div>
+      {children}
+    </article>
+  );
+}
+
+function DashboardLegend({ items = [] }) {
+  if (!items.length) {
+    return null;
+  }
+  return (
+    <div className="dashboard-legend">
+      {items.map((item) => (
+        <span key={item.label}>
+          <i style={{ background: item.color }}></i>
+          {item.label}
+          {item.display ? ` ${item.display}` : ""}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function DashboardBarChart({ title, items = [], subtitle = "", compactLegend = false }) {
+  const safeItems = items.filter((item) => Number(item?.value || 0) >= 0);
+  const maxValue = Math.max(...safeItems.map((item) => Number(item.value || 0)), 1);
+  return (
+    <DashboardPanel title={title} subtitle={subtitle}>
+      <DashboardLegend items={compactLegend ? safeItems : safeItems.map((item) => ({ ...item, display: "" }))} />
+      <div className="dashboard-bar-chart">
+        {safeItems.map((item) => (
+          <div className="dashboard-bar-col" key={item.label}>
+            <div className="dashboard-bar-track">
+              <div
+                className="dashboard-bar-fill"
+                style={{
+                  height: `${Math.max((Number(item.value || 0) / maxValue) * 100, Number(item.value || 0) > 0 ? 12 : 0)}%`,
+                  background: item.color,
+                }}
+              ></div>
+            </div>
+            <strong>{item.label}</strong>
+            <span>{item.display || item.value}</span>
+          </div>
+        ))}
+      </div>
+    </DashboardPanel>
+  );
+}
+
+function DashboardHorizontalBars({ title, items = [], subtitle = "" }) {
+  const maxValue = Math.max(...items.map((item) => Number(item.value || 0)), 1);
+  return (
+    <DashboardPanel title={title} subtitle={subtitle}>
+      <div className="dashboard-horizontal-list">
+        {items.map((item) => (
+          <div className="dashboard-horizontal-row" key={item.label}>
+            <span>{item.label}</span>
+            <div className="dashboard-horizontal-track">
+              <div
+                className="dashboard-horizontal-fill"
+                style={{ width: `${(Number(item.value || 0) / maxValue) * 100}%`, background: item.color }}
+              ></div>
+            </div>
+            <strong>{item.display || item.value}</strong>
+          </div>
+        ))}
+      </div>
+    </DashboardPanel>
+  );
+}
+
+function DashboardDonutChart({ title, items = [], subtitle = "" }) {
+  const total = items.reduce((sum, item) => sum + Number(item.value || 0), 0);
+  let cursor = 0;
+  const gradient = items.length
+    ? items
+        .map((item) => {
+          const start = (cursor / Math.max(total, 1)) * 360;
+          cursor += Number(item.value || 0);
+          const end = (cursor / Math.max(total, 1)) * 360;
+          return `${item.color} ${start}deg ${end}deg`;
+        })
+        .join(", ")
+    : "#2f3641 0deg 360deg";
+  return (
+    <DashboardPanel title={title} subtitle={subtitle}>
+      <DashboardLegend items={items} />
+      <div className="dashboard-donut-wrap">
+        <div className="dashboard-donut" style={{ backgroundImage: `conic-gradient(${gradient})` }}>
+          <div className="dashboard-donut-hole">
+            <strong>{total}</strong>
+            <span>Total</span>
+          </div>
+        </div>
+      </div>
+    </DashboardPanel>
+  );
+}
+
+function DashboardLineChart({ title, series = [], subtitle = "" }) {
+  const safeSeries = Array.isArray(series) ? series : [];
+  const normalizedSeries =
+    safeSeries.length && safeSeries[0]?.points
+      ? safeSeries
+      : [{ name: title, color: "#e3a641", points: safeSeries }];
+  const labels = normalizedSeries[0]?.points?.map((point) => point.label) || [];
+  const values = normalizedSeries.flatMap((item) => item.points.map((point) => Number(point.value || 0)));
+  const maxValue = Math.max(...values, 1);
+  const minValue = Math.min(...values, 0);
+  const range = Math.max(maxValue - minValue, 1);
+  const width = 520;
+  const height = 220;
+  const paddingX = 18;
+  const paddingTop = 18;
+  const paddingBottom = 28;
+  const innerWidth = width - paddingX * 2;
+  const innerHeight = height - paddingTop - paddingBottom;
+
+  function pointString(points) {
+    return points
+      .map((point, index) => {
+        const x = paddingX + (labels.length === 1 ? innerWidth / 2 : (innerWidth * index) / Math.max(labels.length - 1, 1));
+        const y = paddingTop + innerHeight - ((Number(point.value || 0) - minValue) / range) * innerHeight;
+        return `${x},${y}`;
+      })
+      .join(" ");
+  }
+
+  return (
+    <DashboardPanel title={title} subtitle={subtitle}>
+      <DashboardLegend items={normalizedSeries.map((item) => ({ label: item.name, color: item.color }))} />
+      <div className="dashboard-line-shell">
+        <svg viewBox={`0 0 ${width} ${height}`} className="dashboard-line-chart" preserveAspectRatio="none">
+          {[0, 1, 2, 3].map((step) => {
+            const y = paddingTop + (innerHeight / 3) * step;
+            return <line key={step} x1={paddingX} x2={width - paddingX} y1={y} y2={y} className="dashboard-grid-line" />;
+          })}
+          {normalizedSeries.map((item) => (
+            <g key={item.name}>
+              <polyline points={pointString(item.points)} fill="none" stroke={item.color} strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round" />
+              {item.points.map((point, index) => {
+                const x = paddingX + (labels.length === 1 ? innerWidth / 2 : (innerWidth * index) / Math.max(labels.length - 1, 1));
+                const y = paddingTop + innerHeight - ((Number(point.value || 0) - minValue) / range) * innerHeight;
+                return <circle key={`${item.name}-${point.label}`} cx={x} cy={y} r="4.5" fill={item.color} />;
+              })}
+            </g>
+          ))}
+        </svg>
+        <div className="dashboard-axis-labels">
+          {labels.map((label) => (
+            <span key={label}>{label}</span>
+          ))}
+        </div>
+      </div>
+    </DashboardPanel>
+  );
+}
+
 function SalaryCard({ salaryInfo, title }) {
   if (!salaryInfo) {
     return (
-      <section className="salary-card">
+      <section className="salary-card salary-showcase">
         <h3>{title}</h3>
         <div className="empty-state">No salary structure is configured yet.</div>
       </section>
@@ -221,16 +526,17 @@ function SalaryCard({ salaryInfo, title }) {
   ];
 
   return (
-    <section className="salary-card">
+    <section className="salary-card salary-showcase">
       <div className="salary-header">
         <div>
           <span className="eyebrow">Compensation</span>
           <h3>{title}</h3>
+          <div className="table-note">A clean summary of your pay structure, benefits, and deductions.</div>
         </div>
         <Tag value="Salary Info" />
       </div>
       <div className="salary-grid">
-        <div className="stack">
+        <div className="stack salary-panel-block">
           <div className="salary-summary-grid">
             <div className="stat-block">
               <span className="eyebrow">Month Wage</span>
@@ -251,7 +557,7 @@ function SalaryCard({ salaryInfo, title }) {
               <strong>{salaryInfo.breakHours} hrs</strong>
             </div>
           </div>
-          <div>
+          <div className="salary-panel-card">
             <h4 className="salary-section-title">Salary Components</h4>
             {items.map(([label, item]) => (
               <div className="salary-line" key={label}>
@@ -266,8 +572,8 @@ function SalaryCard({ salaryInfo, title }) {
             ))}
           </div>
         </div>
-        <div className="stack">
-          <div>
+        <div className="stack salary-panel-block">
+          <div className="salary-panel-card">
             <h4 className="salary-section-title">Provident Fund (PF) Contribution</h4>
             <div className="salary-line">
               <div>
@@ -290,7 +596,7 @@ function SalaryCard({ salaryInfo, title }) {
               </div>
             </div>
           </div>
-          <div>
+          <div className="salary-panel-card">
             <h4 className="salary-section-title">Tax Deductions</h4>
             <div className="salary-line">
               <div>
@@ -359,7 +665,7 @@ function PublicScreen({ onMode }) {
               <span className="eyebrow">Operations Snapshot</span>
               <h2>Everything the team needs, nothing noisy.</h2>
             </div>
-            <Tag value="Odoo-style flow" />
+            <Tag value="Unified workspace" />
           </div>
           <div className="floating-ribbon ribbon-one">Attendance</div>
           <div className="floating-ribbon ribbon-two">Payroll</div>
@@ -398,43 +704,70 @@ function PublicScreen({ onMode }) {
   );
 }
 
-function AuthScreen({ mode, status, onBack, onModeChange, onLogin, onSignup }) {
+function AuthScreen({ mode, onBack, onModeChange, onLogin, onSignup, onError }) {
+  const [showPassword, setShowPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
+  const [companyLogo, setCompanyLogo] = useState("");
+  const fileInputRef = useRef(null);
+
+  async function handleLogoChange(file) {
+    if (!file) {
+      setCompanyLogo("");
+      return;
+    }
+    const value = await readFileAsDataUrl(file);
+    setCompanyLogo(value);
+  }
+
   return (
-    <section className="auth-shell">
-      <div className="auth-wrapper card">
-        <div className="auth-intro">
-          <button className="back-link" onClick={onBack}>
-            Back to landing
-          </button>
-          <span className="eyebrow">EmPay Access</span>
-          <h2>{mode === "login" ? "Login" : "Create your workspace"}</h2>
-          <p>
-            {mode === "login"
-              ? "Sign in to your workspace and continue from where your team left off."
-              : "Create an admin workspace, set your company name, and start onboarding your team."}
-          </p>
-          <div className={`status-banner ${status.message ? status.type : ""}`}>{status.message}</div>
+    <section className="auth-shell auth-shell-compact">
+      <div className="auth-card-compact card">
+        <button className="back-link auth-back-link" onClick={onBack}>
+          Back to landing
+        </button>
+        <div className="auth-logo-lockup">
+          {companyLogo && mode === "signup" ? (
+            <img className="auth-logo-preview" src={companyLogo} alt="Company logo preview" />
+          ) : (
+            <span className="brand-mark auth-brand-mark">odoo</span>
+          )}
+        </div>
+        <div className="auth-helper-card">
+          {mode === "login"
+            ? "Access and manage your people operations, attendance, leave, and payroll."
+            : "Create the workspace admin account first, then start onboarding your team."}
         </div>
         {mode === "login" ? (
-          <form
-            className="form-grid"
+            <form
+              className="form-grid auth-form-compact"
             onSubmit={(event) => {
               event.preventDefault();
               onLogin(Object.fromEntries(new FormData(event.currentTarget).entries()));
             }}
-          >
-            <label>
-              <span>Email</span>
-              <input type="email" name="email" defaultValue="admin@empay.local" required />
-            </label>
-            <label>
-              <span>Password</span>
-              <input type="password" name="password" defaultValue="Admin@123" required />
-            </label>
-            <button type="submit" className="button primary">
-              Login
+            >
+              <label>
+                <span>Email</span>
+                <input type="email" name="email" placeholder="Enter your email" autoComplete="username" required />
+              </label>
+              <label>
+                <span className="auth-password-label">
+                  <span>Password</span>
+                </span>
+                <div className="password-field">
+                  <input
+                    type={showPassword ? "text" : "password"}
+                    name="password"
+                    placeholder="Enter your password"
+                    autoComplete="current-password"
+                    required
+                  />
+                  <PasswordIconButton visible={showPassword} onClick={() => setShowPassword((prev) => !prev)} />
+                </div>
+              </label>
+            <button type="submit" className="button primary auth-submit">
+              Sign In
             </button>
-            <p className="auth-switch">
+            <p className="auth-switch auth-switch-center">
               Don&apos;t have an account?{" "}
               <button type="button" className="inline-link" onClick={() => onModeChange("signup")}>
                 Sign up
@@ -443,47 +776,106 @@ function AuthScreen({ mode, status, onBack, onModeChange, onLogin, onSignup }) {
           </form>
         ) : (
           <form
-            className="form-grid"
-            onSubmit={(event) => {
+            className="form-grid auth-form-compact"
+            onSubmit={async (event) => {
               event.preventDefault();
-              onSignup(Object.fromEntries(new FormData(event.currentTarget).entries()));
+              const payload = Object.fromEntries(new FormData(event.currentTarget).entries());
+              onSignup({ ...payload, companyLogo });
             }}
-          >
+            >
+            <div className="auth-logo-upload-row">
+              <div className="auth-logo-lockup secondary">
+                {companyLogo ? (
+                  <img className="auth-logo-preview" src={companyLogo} alt="Company logo preview" />
+                ) : (
+                  <span className="auth-logo-placeholder">App/Web Logo</span>
+                )}
+              </div>
+              <div className="auth-logo-upload-copy">
+                <button
+                  type="button"
+                  className="button ghost small"
+                  onClick={() => fileInputRef.current?.click()}
+                >
+                  Upload Logo
+                </button>
+                {companyLogo ? (
+                  <button type="button" className="button ghost small" onClick={() => setCompanyLogo("")}>
+                    Remove
+                  </button>
+                ) : null}
+                <input
+                  ref={fileInputRef}
+                  className="hidden"
+                  type="file"
+                  accept="image/*"
+                  onChange={async (event) => {
+                    try {
+                      await handleLogoChange(event.target.files?.[0]);
+                    } catch (error) {
+                      onError?.(error.message || "Could not read the selected image.");
+                    } finally {
+                      event.target.value = "";
+                    }
+                  }}
+                />
+              </div>
+            </div>
             <label>
               <span>Company Name</span>
-              <input name="companyName" required />
+              <input name="companyName" placeholder="Enter company name" required />
             </label>
             <label>
               <span>Name</span>
-              <input name="fullName" required />
+              <input name="fullName" placeholder="Enter your name" required />
             </label>
-            <div className="split-grid">
-              <label>
-                <span>Email</span>
-                <input type="email" name="email" required />
-              </label>
-              <label>
-                <span>Phone</span>
-                <input name="phone" required />
-              </label>
-            </div>
-            <div className="split-grid">
-              <label>
+            <label>
+              <span>Email</span>
+              <input type="email" name="email" placeholder="Enter your email" autoComplete="username" required />
+            </label>
+            <label>
+              <span>Phone</span>
+              <input name="phone" placeholder="Enter your phone number" required />
+            </label>
+            <label>
+              <span className="auth-password-label">
                 <span>Password</span>
-                <input type="password" name="password" required />
-              </label>
-              <label>
+              </span>
+              <div className="password-field">
+                <input
+                  type={showPassword ? "text" : "password"}
+                  name="password"
+                  placeholder="Create a password"
+                  autoComplete="new-password"
+                  minLength="12"
+                  required
+                />
+                <PasswordIconButton visible={showPassword} onClick={() => setShowPassword((prev) => !prev)} />
+              </div>
+            </label>
+            <label>
+              <span className="auth-password-label">
                 <span>Confirm Password</span>
-                <input type="password" name="confirmPassword" required />
-              </label>
-            </div>
-            <button type="submit" className="button primary">
-              Create Admin Workspace
+              </span>
+              <div className="password-field">
+                <input
+                  type={showConfirmPassword ? "text" : "password"}
+                  name="confirmPassword"
+                  placeholder="Confirm your password"
+                  autoComplete="new-password"
+                  minLength="12"
+                  required
+                />
+                <PasswordIconButton visible={showConfirmPassword} onClick={() => setShowConfirmPassword((prev) => !prev)} />
+              </div>
+            </label>
+            <button type="submit" className="button primary auth-submit">
+              Sign Up
             </button>
-            <p className="auth-switch">
+            <p className="auth-switch auth-switch-center">
               Already have an account?{" "}
               <button type="button" className="inline-link" onClick={() => onModeChange("login")}>
-                Login
+                Sign in
               </button>
             </p>
           </form>
@@ -545,84 +937,553 @@ function QuickAttendanceCard({ record, currentDate, onSubmit }) {
   );
 }
 
-function DashboardView({ dashboard, role, settings }) {
-  const pendingLeaves = dashboard.pendingLeaves || dashboard.recentLeaves || [];
-  const sideContent = dashboard.departmentStats
-    ? Object.entries(dashboard.departmentStats).map(([key, value]) => (
-        <div className="stat-block" key={key}>
-          <span className="eyebrow">{key}</span>
-          <strong>{value}</strong>
-        </div>
-      ))
-    : (dashboard.leaveBalances || []).map((balance) => (
-        <div className="list-item" key={balance.id}>
-          <strong>{balance.leaveTypeName}</strong>
-          <div className="metric-subtext">{balance.balance} days remaining</div>
-        </div>
-      ));
+function AttendancePill({ record, onAction, busy = false }) {
+  const [nowValue, setNowValue] = useState(() => Date.now());
+  const clickTimerRef = useRef(null);
+  const actionState = attendanceActionState(record);
+  const elapsed = formatTimer(attendanceElapsedSeconds(record, nowValue));
+  const toneText =
+    actionState.tone === "done"
+      ? "Checked out"
+      : actionState.tone === "paused"
+        ? "Paused"
+        : actionState.tone === "active"
+          ? "Working time"
+          : "Ready";
+
+  useEffect(() => {
+    if (actionState.tone === "active" || actionState.tone === "paused") {
+      const intervalId = window.setInterval(() => setNowValue(Date.now()), 1000);
+      return () => window.clearInterval(intervalId);
+    }
+    setNowValue(Date.now());
+    return undefined;
+  }, [actionState.tone, record?.checkIn, record?.pauseStartedAt, record?.checkOut]);
+
+  useEffect(
+    () => () => {
+      if (clickTimerRef.current) {
+        window.clearTimeout(clickTimerRef.current);
+      }
+    },
+    []
+  );
+
+    function handleClick() {
+      if (busy) {
+        return;
+      }
+      if (clickTimerRef.current) {
+        window.clearTimeout(clickTimerRef.current);
+      }
+    clickTimerRef.current = window.setTimeout(() => {
+      clickTimerRef.current = null;
+      if (actionState.tone === "idle" || actionState.tone === "done") {
+        onAction("checkin");
+      } else if (actionState.tone === "active") {
+        onAction("pause");
+      } else if (actionState.tone === "paused") {
+        onAction("resume");
+      }
+    }, 220);
+  }
+
+    function handleDoubleClick() {
+      if (busy) {
+        return;
+      }
+      if (clickTimerRef.current) {
+        window.clearTimeout(clickTimerRef.current);
+        clickTimerRef.current = null;
+    }
+    if (record?.checkIn && !record?.checkOut) {
+      onAction("checkout");
+    }
+  }
 
   return (
-    <>
-      <Metrics cards={dashboard.cards} />
-      <section className="panel-grid">
-        <article className="panel">
-          <div className="panel-actions">
-            <div>
-              <span className="eyebrow">Company</span>
-              <h3>{settings.companyName}</h3>
+    <button
+      type="button"
+        className={`attendance-pill ${actionState.tone}`}
+        onClick={handleClick}
+        onDoubleClick={handleDoubleClick}
+        disabled={busy}
+        title="Single click to check in, pause, or resume. Double click to check out."
+      >
+        <span className="attendance-pill-copy">
+          <strong>{actionState.label}</strong>
+          <span>{busy ? "Updating..." : toneText}</span>
+        </span>
+      <span className="attendance-pill-timer">{elapsed}</span>
+    </button>
+  );
+}
+
+function CompensationEditor({ employees, currentSalaryStructure, onSave }) {
+  const [employeeId, setEmployeeId] = useState(String(currentSalaryStructure?.employeeId || employees[0]?.id || ""));
+  const [monthWage, setMonthWage] = useState(Number(currentSalaryStructure?.monthWage || 50000));
+  const [workingDaysPerWeek, setWorkingDaysPerWeek] = useState(Number(currentSalaryStructure?.workingDaysPerWeek || 5));
+  const [breakHours, setBreakHours] = useState(Number(currentSalaryStructure?.breakHours || 1));
+  const [employeePfPercentage, setEmployeePfPercentage] = useState(Number(currentSalaryStructure?.employeePfPercentage || 12));
+  const [employerPfPercentage, setEmployerPfPercentage] = useState(Number(currentSalaryStructure?.employerPfPercentage || 12));
+  const [professionalTax, setProfessionalTax] = useState(Number(currentSalaryStructure?.professionalTax || 200));
+  const [otherDeduction, setOtherDeduction] = useState(Number(currentSalaryStructure?.otherDeduction || 0));
+  const [percentages, setPercentages] = useState({
+    basicPercentage: Number(currentSalaryStructure?.basicPercentage || 50),
+    hraPercentage: Number(currentSalaryStructure?.hraPercentage || 25),
+    standardAllowancePercentage: Number(currentSalaryStructure?.standardAllowancePercentage || 8.33),
+    performanceBonusPercentage: Number(currentSalaryStructure?.performanceBonusPercentage || 4.17),
+    leaveTravelAllowancePercentage: Number(currentSalaryStructure?.leaveTravelAllowancePercentage || 4.17),
+    fixedAllowancePercentage: Number(currentSalaryStructure?.fixedAllowancePercentage || 8.33),
+  });
+
+  useEffect(() => {
+    setEmployeeId(String(currentSalaryStructure?.employeeId || employees[0]?.id || ""));
+    setMonthWage(Number(currentSalaryStructure?.monthWage || 50000));
+    setWorkingDaysPerWeek(Number(currentSalaryStructure?.workingDaysPerWeek || 5));
+    setBreakHours(Number(currentSalaryStructure?.breakHours || 1));
+    setEmployeePfPercentage(Number(currentSalaryStructure?.employeePfPercentage || 12));
+    setEmployerPfPercentage(Number(currentSalaryStructure?.employerPfPercentage || 12));
+    setProfessionalTax(Number(currentSalaryStructure?.professionalTax || 200));
+    setOtherDeduction(Number(currentSalaryStructure?.otherDeduction || 0));
+    setPercentages({
+      basicPercentage: Number(currentSalaryStructure?.basicPercentage || 50),
+      hraPercentage: Number(currentSalaryStructure?.hraPercentage || 25),
+      standardAllowancePercentage: Number(currentSalaryStructure?.standardAllowancePercentage || 8.33),
+      performanceBonusPercentage: Number(currentSalaryStructure?.performanceBonusPercentage || 4.17),
+      leaveTravelAllowancePercentage: Number(currentSalaryStructure?.leaveTravelAllowancePercentage || 4.17),
+      fixedAllowancePercentage: Number(currentSalaryStructure?.fixedAllowancePercentage || 8.33),
+    });
+  }, [currentSalaryStructure, employees]);
+
+  const componentRows = [
+    {
+      key: "basicPercentage",
+      label: "Basic Salary",
+      percentage: percentages.basicPercentage,
+    },
+    {
+      key: "hraPercentage",
+      label: "House Rent Allowance",
+      percentage: percentages.hraPercentage,
+    },
+    {
+      key: "standardAllowancePercentage",
+      label: "Standard Allowance",
+      percentage: percentages.standardAllowancePercentage,
+    },
+    {
+      key: "performanceBonusPercentage",
+      label: "Performance Bonus",
+      percentage: percentages.performanceBonusPercentage,
+    },
+    {
+      key: "leaveTravelAllowancePercentage",
+      label: "Leave Travel Allowance",
+      percentage: percentages.leaveTravelAllowancePercentage,
+    },
+    {
+      key: "fixedAllowancePercentage",
+      label: "Fixed Allowance",
+      percentage: percentages.fixedAllowancePercentage,
+    },
+  ];
+
+  return (
+    <section className="panel compensation-panel">
+      <div className="panel-actions">
+        <div>
+          <span className="eyebrow">Compensation</span>
+          <h3>Edit Percentage and Value Inputs</h3>
+        </div>
+      </div>
+      <form
+        key={currentSalaryStructure?.employeeId || "compensation"}
+        className="form-grid"
+        onSubmit={(event) => {
+          event.preventDefault();
+          onSave({
+            employeeId: Number(employeeId),
+            monthWage,
+            workingDaysPerWeek,
+            breakHours,
+            employeePfPercentage,
+            employerPfPercentage,
+            professionalTax,
+            otherDeduction,
+            ...percentages,
+          });
+        }}
+      >
+        <div className="split-grid">
+          <label>
+            <span>Employee</span>
+            <select name="employeeId" value={employeeId} onChange={(event) => setEmployeeId(event.target.value)}>
+              {employees.map((employee) => (
+                <option key={employee.id} value={employee.id}>
+                  {employee.fullName}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span>Month Wage</span>
+            <input type="number" step="0.01" name="monthWage" value={monthWage} onChange={(event) => setMonthWage(Number(event.target.value || 0))} />
+          </label>
+        </div>
+        <div className="split-grid">
+          <label><span>Working Days / Week</span><input type="number" name="workingDaysPerWeek" value={workingDaysPerWeek} onChange={(event) => setWorkingDaysPerWeek(Number(event.target.value || 0))} /></label>
+          <label><span>Break Hours</span><input type="number" step="0.5" name="breakHours" value={breakHours} onChange={(event) => setBreakHours(Number(event.target.value || 0))} /></label>
+        </div>
+        <div className="compensation-grid">
+          {componentRows.map((row) => (
+            <div className="comp-row" key={row.key}>
+              <strong>{row.label}</strong>
+              <label>
+                <span>Percent</span>
+                <input
+                  type="number"
+                  step="0.01"
+                  name={row.key}
+                  value={row.percentage}
+                  onChange={(event) =>
+                    setPercentages((prev) => ({
+                      ...prev,
+                      [row.key]: Number(event.target.value || 0),
+                    }))
+                  }
+                />
+              </label>
+              <label>
+                <span>Value</span>
+                <input
+                  className="static-input"
+                  type="number"
+                  step="0.01"
+                  value={Number((monthWage * row.percentage) / 100).toFixed(2)}
+                  readOnly
+                />
+              </label>
             </div>
-            <Tag value={role} />
+          ))}
+          <div className="comp-row">
+            <strong>Provident Fund</strong>
+            <label>
+              <span>Employee PF %</span>
+              <input type="number" step="0.01" name="employeePfPercentage" value={employeePfPercentage} onChange={(event) => setEmployeePfPercentage(Number(event.target.value || 0))} />
+            </label>
+            <label>
+              <span>Employer PF %</span>
+              <input type="number" step="0.01" name="employerPfPercentage" value={employerPfPercentage} onChange={(event) => setEmployerPfPercentage(Number(event.target.value || 0))} />
+            </label>
           </div>
-          <div className="stack">
-            {dashboard.attendance ? (
-              <div className="stat-block">
-                <span className="eyebrow">Attendance Snapshot</span>
-                <strong>{dashboard.attendance.payableDays} payable days</strong>
-                <div className="metric-subtext">
-                  {dashboard.attendance.presentDays} present, {dashboard.attendance.absentDays} absent,{" "}
-                  {dashboard.attendance.extraHours} extra hours
-                </div>
-              </div>
-            ) : dashboard.latestPayrun ? (
-              <div className="stat-block">
-                <span className="eyebrow">Latest Payrun</span>
-                <strong>{dashboard.latestPayrun.month}</strong>
-                <div className="metric-subtext">
-                  {dashboard.latestPayrun.records.length} records, {dashboard.latestPayrun.status}
-                </div>
-              </div>
-            ) : (
-              <div className="empty-state">No latest payrun is available yet.</div>
-            )}
-            <div className="panel-grid">{sideContent}</div>
+          <div className="comp-row">
+            <strong>Deductions</strong>
+            <label>
+              <span>Professional Tax</span>
+              <input type="number" step="0.01" name="professionalTax" value={professionalTax} onChange={(event) => setProfessionalTax(Number(event.target.value || 0))} />
+            </label>
+            <label>
+              <span>Other Deduction</span>
+              <input type="number" step="0.01" name="otherDeduction" value={otherDeduction} onChange={(event) => setOtherDeduction(Number(event.target.value || 0))} />
+            </label>
           </div>
-        </article>
-        <article className="panel">
-          <div className="panel-actions">
-            <div>
-              <span className="eyebrow">Workflow Queue</span>
-              <h3>{role === "Employee" ? "Recent Leave Requests" : "Pending Leave Requests"}</h3>
-            </div>
+        </div>
+        <button type="submit" className="button primary">Save Compensation</button>
+      </form>
+    </section>
+  );
+}
+
+function Icon({ name, className = "" }) {
+  const paths = {
+    home: (
+      <path d="M4 10.5 12 4l8 6.5V20h-5.5v-5h-5v5H4z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
+    ),
+    users: (
+      <>
+        <path d="M8.5 12a3 3 0 1 1 0-6 3 3 0 0 1 0 6Z" fill="none" stroke="currentColor" strokeWidth="1.8" />
+        <path d="M15.5 11a2.5 2.5 0 1 1 0-5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+        <path d="M4.5 19a4.5 4.5 0 0 1 8 0" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+        <path d="M14.5 18a3.5 3.5 0 0 1 4-2.7" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+      </>
+    ),
+    directory: (
+      <>
+        <rect x="5" y="4.5" width="14" height="15" rx="3" fill="none" stroke="currentColor" strokeWidth="1.8" />
+        <path d="M8 8.5h8M8 12h8M8 15.5h5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+      </>
+    ),
+    clock: (
+      <>
+        <circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" strokeWidth="1.8" />
+        <path d="M12 8v4.5l3 2" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+      </>
+    ),
+    calendar: (
+      <>
+        <rect x="4.5" y="6" width="15" height="13" rx="2.5" fill="none" stroke="currentColor" strokeWidth="1.8" />
+        <path d="M8 4.5v3M16 4.5v3M4.5 9.5h15" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+      </>
+    ),
+    wallet: (
+      <>
+        <path d="M5 7.5A2.5 2.5 0 0 1 7.5 5H18v14H7.5A2.5 2.5 0 0 1 5 16.5z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
+        <path d="M18 10.5h-4a1.5 1.5 0 0 0 0 3h4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
+      </>
+    ),
+    chart: (
+      <>
+        <path d="M5 19V9M12 19V5M19 19v-7" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+        <path d="M4 19h16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+      </>
+    ),
+    profile: (
+      <>
+        <circle cx="12" cy="9" r="3.2" fill="none" stroke="currentColor" strokeWidth="1.8" />
+        <path d="M5 19a7 7 0 0 1 14 0" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+      </>
+    ),
+    shield: (
+      <path d="M12 4.5 18.5 7v5.4c0 3.8-2.6 6.4-6.5 7.9-3.9-1.5-6.5-4.1-6.5-7.9V7z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
+    ),
+    email: <path d="M4.5 7.5 12 13l7.5-5.5M5 6h14a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1Z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" strokeLinecap="round" />,
+    phone: <path d="M8 5.5c.7 3.5 4 6.8 7.5 7.5l2-2c.4-.4 1-.5 1.5-.3l1.6.7c.6.2 1 .8 1 1.5V17c0 .8-.7 1.5-1.5 1.5C11.7 18.5 4.5 11.3 4.5 2.5 4.5 1.7 5.2 1 6 1h3.6c.7 0 1.3.4 1.5 1l.7 1.6c.2.5.1 1.1-.3 1.5z" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" strokeLinecap="round" />,
+    user: <><circle cx="12" cy="8.5" r="3.2" fill="none" stroke="currentColor" strokeWidth="1.8" /><path d="M5 19a7 7 0 0 1 14 0" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" /></>,
+    role: <path d="M12 4.5 18.5 7v5.4c0 3.8-2.6 6.4-6.5 7.9-3.9-1.5-6.5-4.1-6.5-7.9V7zM9.2 12l1.8 1.8 3.8-4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />,
+    department: <><path d="M5 19V7.5h14V19M3.5 19h17M8 10.5h2M14 10.5h2M8 14h2M14 14h2M10 19v-3h4v3" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" /></>,
+    briefcase: <path d="M8.5 6V4.8A1.8 1.8 0 0 1 10.3 3h3.4a1.8 1.8 0 0 1 1.8 1.8V6m-11 2h15v8a2 2 0 0 1-2 2h-11a2 2 0 0 1-2-2z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" strokeLinecap="round" />,
+    date: <><rect x="4.5" y="6" width="15" height="13" rx="2.5" fill="none" stroke="currentColor" strokeWidth="1.8" /><path d="M8 4.5v3M16 4.5v3M4.5 9.5h15" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" /></>,
+    location: <path d="M12 20c3.5-4 5.2-7 5.2-9.3A5.2 5.2 0 0 0 6.8 10.7C6.8 13 8.5 16 12 20Zm0-7.5a1.9 1.9 0 1 0 0-3.8 1.9 1.9 0 0 0 0 3.8Z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />,
+    emergency: <><path d="M12 3.8 19.2 7v5.3c0 4.1-2.8 6.8-7.2 8.2-4.4-1.4-7.2-4.1-7.2-8.2V7z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" /><path d="M12 8v5M12 16h.01" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" /></>,
+    active: <path d="M12 20a8 8 0 1 0-8-8m8 8a8 8 0 0 0 8-8M8.8 12.2l2 2 4.4-4.4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />,
+    address: <><path d="M6 7.5h12M6 12h12M6 16.5h8" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" /><rect x="4.5" y="4.5" width="15" height="15" rx="3" fill="none" stroke="currentColor" strokeWidth="1.8" /></>,
+    about: <><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" strokeWidth="1.8" /><path d="M12 10v4M12 7.6h.01" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" /></>,
+    heart: <path d="M12 19s-6.5-4.2-8-8.1C2.7 7.5 4.9 5 7.9 5c1.8 0 3.1 1 4.1 2.3C13 6 14.3 5 16.1 5c3 0 5.2 2.5 3.9 5.9-1.5 3.9-8 8.1-8 8.1Z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />,
+    hobby: <path d="M7.5 7.5c2-2 5-2 7 0s2 5 0 7-5 2-7 0-2-5 0-7Zm-2.8 8.3-1.2 4 4-1.2m10.5-10.5 1.5-1.5a2.1 2.1 0 1 0-3-3L15 5.1" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />,
+    skills: <path d="M14.5 4.5 19.5 9.5l-8.9 8.9-5.7 1.2 1.2-5.7zM12 7l5 5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" strokeLinecap="round" />,
+    certificate: <><path d="M8 4.5h8v8H8zM9.5 16l2.5-1.5 2.5 1.5V12H9.5z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" /><path d="M10 8h4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" /></>,
+    company: <><path d="M5 19V7.5h14V19M3.5 19h17M8 10.5h2M14 10.5h2M8 14h2M14 14h2" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" /></>,
+    manager: <><circle cx="12" cy="8" r="3" fill="none" stroke="currentColor" strokeWidth="1.8" /><path d="M6 19c.6-2.8 3-4.5 6-4.5s5.4 1.7 6 4.5M18 8h3M19.5 6.5V9.5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" /></>,
+    photo: <><rect x="4.5" y="6" width="15" height="12" rx="2.5" fill="none" stroke="currentColor" strokeWidth="1.8" /><circle cx="10" cy="11" r="2" fill="none" stroke="currentColor" strokeWidth="1.8" /><path d="m13 15 2-2 2.5 2.5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" /></>,
+    lock: <><rect x="6.5" y="10.5" width="11" height="8" rx="2" fill="none" stroke="currentColor" strokeWidth="1.8" /><path d="M8.5 10.5V8.7a3.5 3.5 0 1 1 7 0v1.8" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" /></>,
+    plus: <path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />,
+    eye: <><path d="M2.8 12s3.3-5.2 9.2-5.2 9.2 5.2 9.2 5.2-3.3 5.2-9.2 5.2S2.8 12 2.8 12Z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" /><circle cx="12" cy="12" r="2.4" fill="none" stroke="currentColor" strokeWidth="1.8" /></>,
+    eyeOff: <><path d="m4 4 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" /><path d="M2.8 12s3.3-5.2 9.2-5.2c2.1 0 3.9.7 5.4 1.6M21.2 12s-3.3 5.2-9.2 5.2c-2.1 0-3.9-.7-5.4-1.6" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" /><path d="M13.7 13.7A2.4 2.4 0 0 1 10.3 10.3" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" /></>,
+    trash: <><path d="M5.5 7h13M9 7V5.5h6V7M8 9.5v7M12 9.5v7M16 9.5v7M7 7h10l-.8 12a1.5 1.5 0 0 1-1.5 1.4h-5.4A1.5 1.5 0 0 1 7.8 19z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" /></>,
+  };
+  return (
+    <svg className={className} viewBox="0 0 24 24" aria-hidden="true">
+      {paths[name] || paths.about}
+    </svg>
+  );
+}
+
+function PasswordIconButton({ visible, onClick }) {
+  return (
+    <button type="button" className="icon-button" onClick={onClick} aria-label={visible ? "Hide password" : "Show password"}>
+      <Icon name={visible ? "eyeOff" : "eye"} className="mini-icon" />
+    </button>
+  );
+}
+
+function FieldLabel({ icon, children, action = null }) {
+  return (
+    <span className="field-label">
+      <span className="field-icon"><Icon name={icon} className="field-icon-svg" /></span>
+      <span>{children}</span>
+      {action}
+    </span>
+  );
+}
+
+function ToastViewport({ toasts }) {
+  return (
+    <div className="toast-stack" aria-live="polite" aria-atomic="true">
+      {toasts.map((toast) => (
+        <div key={toast.id} className={`toast ${toast.type}`}>
+          <span className="toast-mark">{toast.type === "success" ? "OK" : "ER"}</span>
+          <div className="toast-copy">
+            <strong>{toast.type === "success" ? "Success" : "Error"}</strong>
+            <span>{toast.message}</span>
           </div>
-          <div className="list">
-            {pendingLeaves.length ? (
-              pendingLeaves.map((item, index) => (
-                <div className="list-item" key={`${item.id || item.startDate}-${index}`}>
-                  <strong>{item.employeeName || item.leaveTypeName || item.startDate}</strong>
-                  <div className="metric-subtext">
-                    {item.startDate || item.leaveTypeName || ""}
-                    {item.endDate ? ` to ${item.endDate}` : ""}
-                    {item.status ? `, ${item.status}` : ""}
-                  </div>
-                </div>
-              ))
-            ) : (
-              <div className="empty-state">Nothing is waiting right now.</div>
-            )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ModalShell({ title, onClose, children }) {
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal-card" onClick={(event) => event.stopPropagation()}>
+        <div className="panel-actions">
+          <div>
+            <span className="eyebrow">User Detail</span>
+            <h3>{title}</h3>
           </div>
-        </article>
-      </section>
-    </>
+          <button type="button" className="button ghost small" onClick={onClose}>
+            Close
+          </button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function UserDetailModal({ user, onClose, onSave, onDelete }) {
+  if (!user) {
+    return null;
+  }
+  return (
+    <ModalShell title={user.fullName} onClose={onClose}>
+      <form
+        key={user.id}
+        className="form-grid two-col"
+        onSubmit={(event) => {
+          event.preventDefault();
+          onSave(Object.fromEntries(new FormData(event.currentTarget).entries()));
+        }}
+      >
+        <input type="hidden" name="id" value={user.id} />
+        <label><FieldLabel icon="user">Full Name</FieldLabel><input name="fullName" defaultValue={user.fullName} /></label>
+        <label><FieldLabel icon="email">Email</FieldLabel><input name="email" defaultValue={user.email} /></label>
+        <label><FieldLabel icon="phone">Phone</FieldLabel><input name="phone" defaultValue={user.phone || ""} /></label>
+        <label>
+          <FieldLabel icon="role">Role</FieldLabel>
+          <select name="role" defaultValue={user.role}>
+            <option value="Employee">Employee</option>
+            <option value="HR Officer">HR Officer</option>
+            <option value="Payroll Officer">Payroll Officer</option>
+          </select>
+        </label>
+        <label><FieldLabel icon="department">Department</FieldLabel><input name="department" defaultValue={user.department || ""} /></label>
+        <label><FieldLabel icon="briefcase">Designation</FieldLabel><input name="designation" defaultValue={user.designation || ""} /></label>
+        <label><FieldLabel icon="date">Joining Date</FieldLabel><input type="date" name="dateOfJoining" defaultValue={user.dateOfJoining || ""} /></label>
+        <label><FieldLabel icon="location">Location</FieldLabel><input name="location" defaultValue={user.location || ""} /></label>
+        <label><FieldLabel icon="emergency">Emergency Contact</FieldLabel><input name="emergencyContact" defaultValue={user.emergencyContact || ""} /></label>
+        <label>
+          <FieldLabel icon="active">Active</FieldLabel>
+          <select name="active" defaultValue={String(user.active)}>
+            <option value="true">Active</option>
+            <option value="false">Inactive</option>
+          </select>
+        </label>
+        <label className="two-col-span"><FieldLabel icon="address">Address</FieldLabel><textarea name="address" defaultValue={user.address || ""} /></label>
+        <label className="two-col-span"><FieldLabel icon="about">About</FieldLabel><textarea name="about" defaultValue={user.about || ""} /></label>
+        <label className="two-col-span"><FieldLabel icon="heart">What I Love About My Job</FieldLabel><textarea name="loveAboutJob" defaultValue={user.loveAboutJob || ""} /></label>
+        <label className="two-col-span"><FieldLabel icon="hobby">Interests and Hobbies</FieldLabel><textarea name="hobbies" defaultValue={user.hobbies || ""} /></label>
+        <div className="inline-actions modal-actions-row two-col-span">
+          <button type="submit" className="button primary">Save User</button>
+          <button type="button" className="button ghost danger-button" onClick={() => onDelete?.(user)}>
+            <Icon name="trash" className="mini-icon" />
+            Delete User
+          </button>
+        </div>
+      </form>
+    </ModalShell>
+  );
+}
+
+function DashboardView({ dashboard, role, settings }) {
+  return (
+    <section className="dashboard-shell">
+      <div className="dashboard-shell-head">
+        <div>
+          <span className="eyebrow">Workspace Intelligence</span>
+          <h2>{settings.companyName}</h2>
+          <p>{role} overview tailored to the current workspace data.</p>
+        </div>
+      </div>
+      <Metrics cards={dashboard.cards || []} />
+
+      {dashboard.variant === "admin" && (
+        <>
+          <section className="dashboard-row split">
+            <DashboardBarChart title="Headcount by department" items={dashboard.headcountByDepartment || []} compactLegend />
+            <DashboardDonutChart title="Leave type distribution" items={dashboard.leaveTypeDistribution || []} />
+          </section>
+          <section className="dashboard-row">
+            <DashboardLineChart
+              title="Monthly payroll trend"
+              subtitle="Gross payroll across the last five months."
+              series={[{ name: "Payroll", color: "#e3a641", points: dashboard.monthlyPayrollTrend || [] }]}
+            />
+          </section>
+          <section className="dashboard-row">
+            <DashboardHorizontalBars
+              title="Attendance rate by department"
+              items={dashboard.attendanceRateByDepartment || []}
+            />
+          </section>
+        </>
+      )}
+
+      {dashboard.variant === "hr" && (
+        <>
+          <section className="dashboard-row split">
+            <DashboardLineChart
+              title="Weekly attendance"
+              subtitle="Check-ins recorded this week."
+              series={[{ name: "Attendance", color: "#58a47b", points: dashboard.weeklyAttendance || [] }]}
+            />
+            <DashboardDonutChart title="Leave status breakdown" items={dashboard.leaveStatusBreakdown || []} />
+          </section>
+          <section className="dashboard-row">
+            <DashboardBarChart title="Absenteeism rate by department" items={dashboard.absenteeismRateByDepartment || []} />
+          </section>
+          <section className="dashboard-row">
+            <DashboardLineChart
+              title="Headcount growth"
+              subtitle="Active staff progression over the last five months."
+              series={[{ name: "Headcount", color: "#5d84cf", points: dashboard.headcountGrowth || [] }]}
+            />
+          </section>
+        </>
+      )}
+
+      {dashboard.variant === "payroll" && (
+        <>
+          <section className="dashboard-row split">
+            <DashboardDonutChart title="Deductions breakdown" items={dashboard.deductionBreakdown || []} />
+            <DashboardBarChart title="Net payroll by department" items={dashboard.netPayrollByDepartment || []} />
+          </section>
+          <section className="dashboard-row">
+            <DashboardLineChart
+              title="Gross vs net payroll trend"
+              subtitle="Payroll movement across the last five months."
+              series={[
+                { name: "Gross", color: "#e3a641", points: dashboard.grossVsNetTrend?.gross || [] },
+                { name: "Net", color: "#58a47b", points: dashboard.grossVsNetTrend?.net || [] },
+              ]}
+            />
+          </section>
+          <section className="dashboard-row">
+            <DashboardBarChart title="Time-off approvals by week" items={dashboard.timeOffApprovalsByWeek || []} />
+          </section>
+        </>
+      )}
+
+      {dashboard.variant === "employee" && (
+        <>
+          <section className="dashboard-row split">
+            <DashboardDonutChart title="Attendance this month" items={dashboard.attendanceThisMonth || []} />
+            <DashboardHorizontalBars title="Leave balance by type" items={dashboard.leaveBalanceByType || []} />
+          </section>
+          <section className="dashboard-row">
+            <DashboardBarChart title="Salary breakdown" items={dashboard.salaryBreakdown || []} />
+          </section>
+          <section className="dashboard-row">
+            <DashboardLineChart
+              title="Net salary trend"
+              subtitle="Latest processed payroll values over time."
+              series={[{ name: "Net salary", color: "#e3a641", points: dashboard.netSalaryTrend || [] }]}
+            />
+          </section>
+        </>
+      )}
+    </section>
   );
 }
 
@@ -677,6 +1538,8 @@ function DirectoryTable({ employees, onSelect, showAction = false }) {
 
 function App() {
   const [state, setState] = useState(createInitialState);
+  const toastTimersRef = useRef(new Map());
+  const profilePhotoInputRef = useRef(null);
 
   const availableViews = useMemo(
     () =>
@@ -688,30 +1551,59 @@ function App() {
 
   const visibleEmployeeId = state.role === "Employee" ? state.me?.id : state.selectedUserId || state.me?.id;
   const selectedUser = state.employees.find((employee) => employee.id === visibleEmployeeId) || state.employees[0];
+  const manageUser = state.employees.find((employee) => employee.id === state.manageUserModalId) || null;
   const currentSalaryStructure = state.salaryStructures[0] || null;
+  const currentAttendanceRecord = state.quickAttendance;
 
   function setStatus(message = "", type = "info") {
-    setState((prev) => ({ ...prev, status: { message, type } }));
-  }
-
-  async function bootstrap() {
-    try {
-      const auth = await api("/api/auth/me");
+    const normalizedType = type === "error" || type === "danger" ? "error" : "success";
+    if (!message) {
+      setState((prev) => ({ ...prev, status: { message: "", type: normalizedType } }));
+      return;
+    }
+    const id = makeToastId();
+    setState((prev) => ({
+      ...prev,
+      status: { message, type: normalizedType },
+      toasts: [...prev.toasts, { id, message, type: normalizedType }],
+    }));
+    const timeoutId = window.setTimeout(() => {
       setState((prev) => ({
         ...prev,
-        screen: "app",
+        toasts: prev.toasts.filter((toast) => toast.id !== id),
+      }));
+      toastTimersRef.current.delete(id);
+    }, 3000);
+    toastTimersRef.current.set(id, timeoutId);
+  }
+
+    async function bootstrap() {
+      try {
+        const auth = await api("/api/auth/me");
+        const resolvedDate = localDateKey();
+        const resolvedMonth = resolvedDate.slice(0, 7);
+        setState((prev) => ({
+          ...prev,
+          screen: "app",
+        csrfToken: auth.csrfToken || "",
         me: auth.user,
         role: auth.role,
+        serverNow: auth.serverNow || prev.serverNow,
+        currentDate: resolvedDate,
+        currentMonth: resolvedMonth,
         settings: auth.settings || prev.settings,
         permissions: auth.permissions || {},
         selectedUserId: auth.user.id,
-        attendanceFilter: { ...prev.attendanceFilter, employeeId: auth.user.id },
-        leaveFilter: { ...prev.leaveFilter, employeeId: auth.user.id },
-        payrollFilter: { ...prev.payrollFilter, employeeId: auth.user.id },
+        attendanceFilter: { ...prev.attendanceFilter, employeeId: auth.user.id, month: resolvedMonth },
+        leaveFilter: { ...prev.leaveFilter, employeeId: auth.user.id, month: resolvedMonth },
+        payrollFilter: { ...prev.payrollFilter, employeeId: auth.user.id, month: resolvedMonth },
       }));
       await loadView("dashboard", {
         me: auth.user,
         role: auth.role,
+        serverNow: auth.serverNow,
+        currentDate: resolvedDate,
+        currentMonth: resolvedMonth,
         permissions: auth.permissions || {},
         settings: auth.settings || state.settings,
         selectedUserId: auth.user.id,
@@ -727,23 +1619,25 @@ function App() {
     return payload.employees;
   }
 
-  async function loadQuickAttendance(ctx = state) {
-    const role = ctx.role ?? state.role;
-    const me = ctx.me ?? state.me;
-    if (role !== "Employee" || !me) {
-      setState((prev) => ({ ...prev, quickAttendance: null }));
-      return null;
-    }
-    const payload = await api(
-      `/api/attendance?${query({
-        employeeId: me.id,
-        month: ctx.currentMonth || state.currentMonth,
-        day: ctx.currentDate || state.currentDate,
+    async function loadQuickAttendance(ctx = state) {
+      const role = ctx.role ?? state.role;
+      const me = ctx.me ?? state.me;
+      if (role !== "Employee" || !me) {
+        setState((prev) => ({ ...prev, quickAttendance: null }));
+        return null;
+      }
+      const resolvedDate = localDateKey();
+      const resolvedMonth = resolvedDate.slice(0, 7);
+      const payload = await api(
+        `/api/attendance?${query({
+          employeeId: me.id,
+          month: resolvedMonth,
+        day: resolvedDate,
       })}`
     );
-    const record = payload.records[0] || null;
-    setState((prev) => ({ ...prev, quickAttendance: record }));
-    return record;
+      const record = normalizeQuickAttendance(payload.records[0] || null, resolvedDate);
+      setState((prev) => ({ ...prev, quickAttendance: record, attendancePillBusy: false }));
+      return record;
   }
 
   async function loadDashboard(ctx = state) {
@@ -843,6 +1737,26 @@ function App() {
   }, []);
 
   useEffect(() => {
+    const storedTheme = window.localStorage.getItem("empay-theme");
+    if (storedTheme && THEME_OPTIONS.some((theme) => theme.id === storedTheme)) {
+      setState((prev) => ({ ...prev, theme: storedTheme }));
+    }
+  }, []);
+
+  useEffect(
+    () => () => {
+      toastTimersRef.current.forEach((timeoutId) => window.clearTimeout(timeoutId));
+      toastTimersRef.current.clear();
+    },
+    []
+  );
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = state.theme || "pearl";
+    window.localStorage.setItem("empay-theme", state.theme || "pearl");
+  }, [state.theme]);
+
+  useEffect(() => {
     function handleClick(event) {
       if (!event.target.closest(".profile-menu")) {
         setState((prev) => ({ ...prev, profileMenuOpen: false }));
@@ -854,10 +1768,12 @@ function App() {
 
   async function handleLogin(values) {
     try {
-      await api("/api/auth/login", {
+      const payload = sanitizeValues(values);
+      const auth = await api("/api/auth/login", {
         method: "POST",
-        body: JSON.stringify(values),
+        body: JSON.stringify(payload),
       });
+      setState((prev) => ({ ...prev, csrfToken: auth.csrfToken || "" }));
       setStatus("Login successful.", "success");
       await bootstrap();
     } catch (error) {
@@ -867,10 +1783,17 @@ function App() {
 
   async function handleSignup(values) {
     try {
-      await api("/api/auth/signup", {
+      const payload = sanitizeValues(values);
+      const passwordError = validatePasswordStrength(payload.password);
+      if (passwordError) {
+        setStatus(passwordError, "error");
+        return;
+      }
+      const auth = await api("/api/auth/signup", {
         method: "POST",
-        body: JSON.stringify(values),
+        body: JSON.stringify(payload),
       });
+      setState((prev) => ({ ...prev, csrfToken: auth.csrfToken || "" }));
       setStatus("Workspace created successfully.", "success");
       await bootstrap();
     } catch (error) {
@@ -879,7 +1802,7 @@ function App() {
   }
 
   async function handleLogout() {
-    await api("/api/auth/logout", { method: "POST" });
+    await api("/api/auth/logout", { method: "POST", csrfToken: state.csrfToken });
     setState(createInitialState());
   }
 
@@ -888,6 +1811,7 @@ function App() {
       await api("/api/attendance/mark", {
         method: "POST",
         body: JSON.stringify(values),
+        csrfToken: state.csrfToken,
       });
       setStatus(`Attendance ${values.action} recorded.`, "success");
       await loadQuickAttendance();
@@ -901,9 +1825,16 @@ function App() {
 
   async function handleCreateUser(values) {
     try {
+      const payload = sanitizeValues(values);
+      const passwordError = validatePasswordStrength(payload.password);
+      if (passwordError) {
+        setStatus(passwordError, "error");
+        return;
+      }
       await api("/api/employees", {
         method: "POST",
-        body: JSON.stringify(values),
+        body: JSON.stringify(payload),
+        csrfToken: state.csrfToken,
       });
       setStatus("New user created.", "success");
       await loadView("manageUsers");
@@ -914,11 +1845,35 @@ function App() {
 
   async function handleUpdateUser(values) {
     try {
+      const payload = sanitizeValues(values);
       await api(`/api/employees/${values.id}`, {
         method: "PUT",
-        body: JSON.stringify({ ...values, active: values.active === "true" }),
+        body: JSON.stringify({ ...payload, active: payload.active === "true" }),
+        csrfToken: state.csrfToken,
       });
       setStatus("User updated successfully.", "success");
+      await loadView("manageUsers");
+      return true;
+    } catch (error) {
+      setStatus(error.message, "error");
+      return false;
+    }
+  }
+
+  async function handleDeleteUser(user) {
+    if (!user?.id) {
+      return;
+    }
+    if (!window.confirm(`Delete ${user.fullName}? This will remove the user and related records.`)) {
+      return;
+    }
+    try {
+      await api(`/api/employees/${user.id}`, {
+        method: "DELETE",
+        csrfToken: state.csrfToken,
+      });
+      setStatus("User deleted successfully.", "success");
+      setState((prev) => ({ ...prev, manageUserModalId: null, selectedUserId: null }));
       await loadView("manageUsers");
     } catch (error) {
       setStatus(error.message, "error");
@@ -930,6 +1885,7 @@ function App() {
       await api("/api/attendance/mark", {
         method: "POST",
         body: JSON.stringify(values),
+        csrfToken: state.csrfToken,
       });
       setStatus(`Attendance ${values.action} recorded.`, "success");
       await loadView("attendance");
@@ -943,6 +1899,7 @@ function App() {
       await api(`/api/leaves/${values.id}`, {
         method: "PATCH",
         body: JSON.stringify({ action: values.action }),
+        csrfToken: state.csrfToken,
       });
       setStatus(`Leave request ${values.action}d successfully.`, "success");
       await loadView("leave");
@@ -958,21 +1915,119 @@ function App() {
         ...prev,
         me: { ...prev.me, profilePhoto },
       }));
-      setStatus("Profile photo ready to save.", "info");
-    } catch {
-      setStatus("Could not read the selected image.", "error");
+      setStatus("Profile photo selected.", "success");
+    } catch (error) {
+      setStatus(error.message || "Could not read the selected image.", "error");
     }
   }
 
-  async function handleProfileSave(values) {
+  async function handleRemoveProfilePhoto() {
     try {
       await api(`/api/employees/${state.me.id}`, {
         method: "PUT",
-        body: JSON.stringify(values),
+        body: JSON.stringify({ profilePhoto: "" }),
+        csrfToken: state.csrfToken,
+      });
+      setState((prev) => ({
+        ...prev,
+        me: { ...prev.me, profilePhoto: "" },
+      }));
+      setStatus("Profile photo removed.", "success");
+    } catch (error) {
+      setStatus(error.message, "error");
+    }
+  }
+
+  function handleThemeChange(themeId) {
+    setState((prev) => ({ ...prev, theme: themeId }));
+    setStatus(`${THEME_OPTIONS.find((theme) => theme.id === themeId)?.name || "Theme"} applied.`, "success");
+  }
+
+    async function handleAttendancePillAction(action) {
+      if (state.attendancePillBusy) {
+        return;
+      }
+      const now = new Date();
+      const today = localDateKey(now);
+      const month = today.slice(0, 7);
+      setState((prev) => ({ ...prev, attendancePillBusy: true }));
+      try {
+        await api("/api/attendance/mark", {
+          method: "POST",
+          body: JSON.stringify({
+            action,
+            date: today,
+            time: localTimeKey(now),
+          }),
+          csrfToken: state.csrfToken,
+        });
+        setStatus(
+          action === "checkin"
+            ? "Checked in successfully."
+            : action === "checkout"
+              ? "Checked out successfully."
+              : action === "pause"
+                ? "Timer paused."
+                : "Timer resumed.",
+          "success"
+        );
+        await loadQuickAttendance({ ...state, currentDate: today, currentMonth: month });
+        if (state.view === "attendance" || state.view === "dashboard") {
+          await loadView(state.view);
+        }
+      } catch (error) {
+        setStatus(error.message, "error");
+        await loadQuickAttendance({ ...state, currentDate: today, currentMonth: month });
+      } finally {
+        setState((prev) => ({ ...prev, attendancePillBusy: false }));
+      }
+    }
+
+  async function handleProfileSave(values) {
+    try {
+      const payload = sanitizeValues(values);
+      await api(`/api/employees/${state.me.id}`, {
+        method: "PUT",
+        body: JSON.stringify(payload),
+        csrfToken: state.csrfToken,
       });
       setStatus("Profile updated.", "success");
       await bootstrap();
       await loadView("profile");
+    } catch (error) {
+      setStatus(error.message, "error");
+    }
+  }
+
+  async function handleChangePassword(values) {
+    try {
+      const payload = sanitizeValues(values);
+      const passwordError = validatePasswordStrength(payload.newPassword);
+      if (passwordError) {
+        setStatus(passwordError, "error");
+        return;
+      }
+      await api("/api/auth/change-password", {
+        method: "POST",
+        body: JSON.stringify(payload),
+        csrfToken: state.csrfToken,
+      });
+      setStatus("Password changed successfully.", "success");
+    } catch (error) {
+      setStatus(error.message, "error");
+    }
+  }
+
+  async function handleCreateLeaveType(values) {
+    try {
+      const payload = sanitizeValues(values);
+      await api("/api/leave-types", {
+        method: "POST",
+        body: JSON.stringify(payload),
+        csrfToken: state.csrfToken,
+      });
+      setStatus("Leave type created.", "success");
+      await loadView("leave");
     } catch (error) {
       setStatus(error.message, "error");
     }
@@ -986,6 +2041,7 @@ function App() {
         <PublicScreen
           onMode={(mode) => setState((prev) => ({ ...prev, screen: "auth", authMode: mode }))}
         />
+        <ToastViewport toasts={state.toasts} />
       </>
     );
   }
@@ -997,12 +2053,13 @@ function App() {
         <div className="ambient ambient-two"></div>
         <AuthScreen
           mode={state.authMode}
-          status={state.status}
           onBack={() => setState((prev) => ({ ...prev, screen: "public" }))}
           onModeChange={(authMode) => setState((prev) => ({ ...prev, authMode }))}
           onLogin={handleLogin}
           onSignup={handleSignup}
+          onError={(message) => setStatus(message, "error")}
         />
+        <ToastViewport toasts={state.toasts} />
       </>
     );
   }
@@ -1014,8 +2071,19 @@ function App() {
       <section className="app-shell">
         <aside className="app-sidebar card">
           <div className="sidebar-top">
-            <span className="brand-mark">EmPay</span>
-            <p className="muted">{state.settings.companyName}</p>
+            <div className="sidebar-brand">
+              <div className="sidebar-logo-shell">
+                {state.settings.companyLogo ? (
+                  <img className="brand-logo" src={state.settings.companyLogo} alt={state.settings.companyName} />
+                ) : (
+                  <span className="brand-mark">EmPay</span>
+                )}
+              </div>
+              <div className="sidebar-brand-copy sidebar-text">
+                <strong className="sidebar-company-name">{state.settings.companyName}</strong>
+                <span className="muted sidebar-company-tag">People OS</span>
+              </div>
+            </div>
           </div>
           <nav className="nav">
             {availableViews.map((item) => (
@@ -1023,20 +2091,13 @@ function App() {
                 key={item.key}
                 className={state.view === item.key ? "active" : ""}
                 onClick={() => loadView(item.key)}
+                title={item.label}
               >
-                {item.label}
+                <span className="nav-icon"><Icon name={item.icon} className="nav-icon-svg" /></span>
+                <span className="sidebar-text">{item.label}</span>
               </button>
             ))}
           </nav>
-          <div className="sidebar-utility">
-            {state.role === "Employee" && (
-              <QuickAttendanceCard
-                record={state.quickAttendance}
-                currentDate={state.currentDate}
-                onSubmit={handleQuickAttendance}
-              />
-            )}
-          </div>
         </aside>
         <main className="app-main">
           <header className="app-header">
@@ -1045,9 +2106,13 @@ function App() {
               <h1>{viewConfig[state.view]?.label || "Dashboard"}</h1>
             </div>
             <div className="header-right">
-              <div className={`status-banner ${state.status.message ? state.status.type : ""}`}>
-                {state.status.message}
-              </div>
+                {state.role === "Employee" && (
+                 <AttendancePill
+                   record={currentAttendanceRecord}
+                   onAction={handleAttendancePillAction}
+                   busy={state.attendancePillBusy}
+                 />
+                )}
               <div className="profile-menu">
                 <button
                   className="profile-button"
@@ -1063,13 +2128,12 @@ function App() {
                       initialsFor(state.me?.fullName)
                     )}
                   </span>
-                  <strong>{state.me?.fullName}</strong>
                 </button>
                 {!state.profileMenuOpen ? null : (
                   <div className="profile-dropdown">
-                    <button className="dropdown-item" onClick={() => loadView("profile")}>
-                      My Profile
-                    </button>
+                      <button className="dropdown-item" onClick={() => loadView("profile")}>
+                        My Profile
+                      </button>
                     <button className="dropdown-item danger" onClick={handleLogout}>
                       Logout
                     </button>
@@ -1095,60 +2159,9 @@ function App() {
                       </div>
                     </div>
                   </div>
-                  <DirectoryTable employees={state.employees} onSelect={(id) => setState((prev) => ({ ...prev, selectedUserId: id }))} showAction />
+                  <DirectoryTable employees={state.employees} onSelect={(id) => setState((prev) => ({ ...prev, manageUserModalId: id }))} showAction />
                 </section>
-                <section className="panel-grid">
-                  <article className="panel">
-                    <div className="panel-actions">
-                      <div>
-                        <span className="eyebrow">User Detail</span>
-                        <h3>{selectedUser?.fullName || "Select a user"}</h3>
-                      </div>
-                    </div>
-                    {selectedUser ? (
-                      <form
-                        key={selectedUser.id}
-                        className="form-grid two-col"
-                        onSubmit={(event) => {
-                          event.preventDefault();
-                          handleUpdateUser(Object.fromEntries(new FormData(event.currentTarget).entries()));
-                        }}
-                      >
-                        <input type="hidden" name="id" value={selectedUser.id} />
-                        <label><span>Full Name</span><input name="fullName" defaultValue={selectedUser.fullName} /></label>
-                        <label><span>Email</span><input name="email" defaultValue={selectedUser.email} /></label>
-                        <label><span>Phone</span><input name="phone" defaultValue={selectedUser.phone || ""} /></label>
-                        <label>
-                          <span>Role</span>
-                          <select name="role" defaultValue={selectedUser.role}>
-                            <option value="Employee">Employee</option>
-                            <option value="HR Officer">HR Officer</option>
-                            <option value="Payroll Officer">Payroll Officer</option>
-                          </select>
-                        </label>
-                        <label><span>Department</span><input name="department" defaultValue={selectedUser.department || ""} /></label>
-                        <label><span>Designation</span><input name="designation" defaultValue={selectedUser.designation || ""} /></label>
-                        <label><span>Joining Date</span><input type="date" name="dateOfJoining" defaultValue={selectedUser.dateOfJoining || ""} /></label>
-                        <label><span>Status</span><input name="employmentStatus" defaultValue={selectedUser.employmentStatus || ""} /></label>
-                        <label><span>Emergency Contact</span><input name="emergencyContact" defaultValue={selectedUser.emergencyContact || ""} /></label>
-                        <label>
-                          <span>Active</span>
-                          <select name="active" defaultValue={String(selectedUser.active)}>
-                            <option value="true">Active</option>
-                            <option value="false">Inactive</option>
-                          </select>
-                        </label>
-                        <label className="two-col-span"><span>Address</span><textarea name="address" defaultValue={selectedUser.address || ""} /></label>
-                        <label className="two-col-span"><span>About</span><textarea name="about" defaultValue={selectedUser.about || ""} /></label>
-                        <label className="two-col-span"><span>What I Love About My Job</span><textarea name="loveAboutJob" defaultValue={selectedUser.loveAboutJob || ""} /></label>
-                        <label className="two-col-span"><span>Interests and Hobbies</span><textarea name="hobbies" defaultValue={selectedUser.hobbies || ""} /></label>
-                        <button type="submit" className="button primary">Save User</button>
-                      </form>
-                    ) : (
-                      <div className="empty-state">Choose a user from the table to edit details.</div>
-                    )}
-                  </article>
-                  <article className="panel">
+                <section className="panel">
                     <div className="panel-actions">
                       <div>
                         <span className="eyebrow">Onboard</span>
@@ -1168,7 +2181,7 @@ function App() {
                         <label><span>Phone</span><input name="phone" required /></label>
                       </div>
                       <div className="split-grid">
-                        <label><span>Password</span><input type="password" name="password" required /></label>
+                        <label><span>Password</span><input type="password" name="password" autoComplete="new-password" minLength="12" required /></label>
                         <label><span>Employee ID</span><input name="employeeId" placeholder="EMP-010" /></label>
                       </div>
                       <div className="split-grid">
@@ -1186,10 +2199,24 @@ function App() {
                         <label><span>Department</span><input name="department" /></label>
                         <label><span>Designation</span><input name="designation" /></label>
                       </div>
+                      <div className="split-grid">
+                        <label><span>Location</span><input name="location" defaultValue="Bengaluru" /></label>
+                        <label><span>Joining Date</span><input type="date" name="dateOfJoining" defaultValue={state.currentDate} /></label>
+                      </div>
                       <button type="submit" className="button primary">Create User</button>
                     </form>
-                  </article>
                 </section>
+                <UserDetailModal
+                  user={manageUser}
+                  onClose={() => setState((prev) => ({ ...prev, manageUserModalId: null }))}
+                  onSave={async (values) => {
+                    const ok = await handleUpdateUser(values);
+                    if (ok) {
+                      setState((prev) => ({ ...prev, manageUserModalId: null }));
+                    }
+                  }}
+                  onDelete={handleDeleteUser}
+                />
               </>
             )}
 
@@ -1208,53 +2235,32 @@ function App() {
 
             {state.view === "attendance" && state.attendance && (
               <>
-                <section className="panel-grid">
-                  <article className="panel">
-                    <div className="panel-actions">
-                      <div>
-                        <span className="eyebrow">Self Attendance</span>
-                        <h3>Mark Your Own Attendance</h3>
-                        <div className="table-note">Attendance uses manual date and time entry.</div>
+                <section className="table-card">
+                  <div className="table-card-head">
+                    <div>
+                      <span className="eyebrow">Attendance Register</span>
+                      <h3>{state.attendance.employee.fullName}</h3>
+                      <div className="table-note">
+                        {state.role === "Employee"
+                          ? "Use the compact attendance pill near your profile photo to control check-in, pause, resume, and checkout."
+                          : "Review filtered attendance logs for the selected employee or month."}
                       </div>
                     </div>
-                    <form
-                      className="form-grid"
-                      onSubmit={(event) => {
-                        event.preventDefault();
-                        const values = Object.fromEntries(new FormData(event.currentTarget).entries());
-                        handleAttendanceMark({ ...values, action: event.nativeEvent.submitter?.value });
-                      }}
-                    >
-                      <div className="split-grid">
-                        <label><span>Date</span><input type="date" name="date" defaultValue={state.currentDate} required /></label>
-                        <label><span>Time</span><input type="time" name="time" defaultValue="09:00" required /></label>
-                      </div>
-                      <div className="inline-actions">
-                        <button type="submit" className="button primary" value="checkin">Check In</button>
-                        <button type="submit" className="button secondary" value="checkout">Check Out</button>
-                      </div>
-                    </form>
-                  </article>
-                  <article className="panel">
-                    <div className="panel-actions">
-                      <div>
-                        <span className="eyebrow">Attendance Filters</span>
-                        <h3>View Logs</h3>
-                      </div>
-                    </div>
-                    <form
-                      className="form-grid"
-                      key={`${state.attendanceFilter.employeeId}-${state.attendanceFilter.month}-${state.attendanceFilter.day}`}
-                      onSubmit={(event) => {
-                        event.preventDefault();
-                        const values = Object.fromEntries(new FormData(event.currentTarget).entries());
-                        loadAttendance({
-                          month: values.month || state.currentMonth,
-                          day: values.day || "",
-                          employeeId: state.permissions.canViewAttendanceDirectory ? values.employeeId || visibleEmployeeId : state.me.id,
-                        });
-                      }}
-                    >
+                  </div>
+                  <form
+                    className="attendance-toolbar"
+                    key={`${state.attendanceFilter.employeeId}-${state.attendanceFilter.month}-${state.attendanceFilter.day}`}
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      const values = Object.fromEntries(new FormData(event.currentTarget).entries());
+                      loadAttendance({
+                        month: values.month || state.currentMonth,
+                        day: values.day || "",
+                        employeeId: state.permissions.canViewAttendanceDirectory ? values.employeeId || visibleEmployeeId : state.me.id,
+                      });
+                    }}
+                  >
+                    <div className="attendance-filter-fields">
                       {state.permissions.canViewAttendanceDirectory && (
                         <label>
                           <span>Employee</span>
@@ -1267,28 +2273,54 @@ function App() {
                           </select>
                         </label>
                       )}
-                      <div className="split-grid">
-                        <label><span>Month</span><input type="month" name="month" defaultValue={state.attendanceFilter.month} /></label>
-                        <label><span>Specific Day</span><input type="date" name="day" defaultValue={state.attendanceFilter.day} /></label>
-                      </div>
-                      <button type="submit" className="button ghost">Apply Filters</button>
-                    </form>
-                    <div className="stat-block">
-                      <span className="eyebrow">Summary</span>
-                      <strong>{state.attendance.summary.payableDays} payable days</strong>
-                      <div className="metric-subtext">
-                        {state.attendance.summary.presentDays} present, {state.attendance.summary.absentDays} absent, {state.attendance.summary.extraHours} extra hours
+                      <label><span>Month</span><input type="month" name="month" defaultValue={state.attendanceFilter.month} /></label>
+                      <label><span>Specific Day</span><input type="date" name="day" defaultValue={state.attendanceFilter.day} /></label>
+                    </div>
+                    <div className="attendance-toolbar-actions">
+                      <div className="toolbar">
+                        <button type="submit" className="button ghost">Apply</button>
+                        <button
+                          type="button"
+                          className="button ghost"
+                          onClick={() =>
+                            loadAttendance({
+                              month: state.currentMonth,
+                              day: state.currentDate,
+                              employeeId: state.permissions.canViewAttendanceDirectory ? visibleEmployeeId : state.me.id,
+                            })
+                          }
+                        >
+                          Today
+                        </button>
+                        <button
+                          type="button"
+                          className="button ghost"
+                          onClick={() =>
+                            loadAttendance({
+                              month: state.currentMonth,
+                              day: "",
+                              employeeId: state.permissions.canViewAttendanceDirectory ? visibleEmployeeId : state.me.id,
+                            })
+                          }
+                        >
+                          This Month
+                        </button>
+                        <button
+                          type="button"
+                          className="button ghost"
+                          onClick={() =>
+                            loadAttendance({
+                              month: state.currentMonth,
+                              day: "",
+                              employeeId: state.permissions.canViewAttendanceDirectory ? "" : state.me.id,
+                            })
+                          }
+                        >
+                          Reset
+                        </button>
                       </div>
                     </div>
-                  </article>
-                </section>
-                <section className="table-card">
-                  <div className="panel-actions">
-                    <div>
-                      <span className="eyebrow">Attendance Register</span>
-                      <h3>{state.attendance.employee.fullName}</h3>
-                    </div>
-                  </div>
+                  </form>
                   <div className="table-wrap">
                     <table>
                       <thead>
@@ -1340,7 +2372,11 @@ function App() {
                         const values = Object.fromEntries(new FormData(event.currentTarget).entries());
                         if (state.role === "Employee") values.employeeId = state.me.id;
                         try {
-                          await api("/api/leaves", { method: "POST", body: JSON.stringify(values) });
+                          await api("/api/leaves", {
+                            method: "POST",
+                            body: JSON.stringify(values),
+                            csrfToken: state.csrfToken,
+                          });
                           setStatus("Leave request submitted.", "success");
                           await loadView("leave");
                         } catch (error) {
@@ -1393,6 +2429,32 @@ function App() {
                         </div>
                       ))}
                     </div>
+                    {state.role === "Admin" && (
+                      <form
+                        className="form-grid admin-inline-form"
+                        onSubmit={(event) => {
+                          event.preventDefault();
+                          handleCreateLeaveType(Object.fromEntries(new FormData(event.currentTarget).entries()));
+                          event.currentTarget.reset();
+                        }}
+                      >
+                        <div>
+                          <span className="eyebrow">Admin</span>
+                          <h3>Create Leave Type</h3>
+                        </div>
+                        <div className="split-grid">
+                          <label>
+                            <FieldLabel icon="plus">Leave Type Name</FieldLabel>
+                            <input name="name" placeholder="Optional Holiday" required />
+                          </label>
+                          <label>
+                            <FieldLabel icon="calendar">Default Balance</FieldLabel>
+                            <input type="number" step="0.5" name="defaultBalance" defaultValue="0" required />
+                          </label>
+                        </div>
+                        <button type="submit" className="button ghost">Create Leave Type</button>
+                      </form>
+                    )}
                   </article>
                 </section>
                 <section className="table-card">
@@ -1537,7 +2599,7 @@ function App() {
                               <td>{formatCurrency(payslip.deductions.totalDeductions)}</td>
                               <td>{formatCurrency(payslip.netPay)}</td>
                               <td><Tag value={payslip.status} /></td>
-                              <td><button className="button ghost small" onClick={() => triggerPayslipDownload(state.me.id, payslip.month)}>Download</button></td>
+                              <td><button className="button ghost small" onClick={() => triggerPayslipDownload(state.me.id, payslip.month)}>Download PDF</button></td>
                             </tr>
                           ))
                         ) : (
@@ -1611,7 +2673,11 @@ function App() {
                         event.preventDefault();
                         const values = Object.fromEntries(new FormData(event.currentTarget).entries());
                         try {
-                          await api("/api/payruns/generate", { method: "POST", body: JSON.stringify(values) });
+                          await api("/api/payruns/generate", {
+                            method: "POST",
+                            body: JSON.stringify(values),
+                            csrfToken: state.csrfToken,
+                          });
                           setStatus("Payrun generated.", "success");
                           await loadView("payroll");
                         } catch (error) {
@@ -1624,62 +2690,23 @@ function App() {
                     </form>
                   </article>
                 </section>
-                <SalaryCard
-                  salaryInfo={currentSalaryStructure?.salaryInfo}
-                  title={`Salary Info - ${currentSalaryStructure?.employeeName || "Selected Employee"}`}
-                />
-                <section className="panel">
-                  <div className="panel-actions">
-                    <div>
-                      <span className="eyebrow">Salary Structure</span>
-                      <h3>Edit Salary Inputs</h3>
-                    </div>
-                  </div>
-                  <form
-                    key={currentSalaryStructure?.employeeId || "salary"}
-                    className="form-grid two-col"
-                    onSubmit={async (event) => {
-                      event.preventDefault();
-                      const form = Object.fromEntries(new FormData(event.currentTarget).entries());
-                      const payload = { employeeId: form.employeeId };
-                      Object.entries(form).forEach(([key, value]) => {
-                        if (key !== "employeeId") payload[key] = Number(value || 0);
+                <CompensationEditor
+                  employees={state.employees}
+                  currentSalaryStructure={currentSalaryStructure}
+                  onSave={async (payload) => {
+                    try {
+                      await api("/api/payroll/structures", {
+                        method: "POST",
+                        body: JSON.stringify(payload),
+                        csrfToken: state.csrfToken,
                       });
-                      try {
-                        await api("/api/payroll/structures", { method: "POST", body: JSON.stringify(payload) });
-                        setStatus("Salary structure saved.", "success");
-                        await loadView("payroll");
-                      } catch (error) {
-                        setStatus(error.message, "error");
-                      }
-                    }}
-                  >
-                    <label>
-                      <span>Employee</span>
-                      <select name="employeeId" defaultValue={currentSalaryStructure?.employeeId}>
-                        {state.employees.map((employee) => (
-                          <option key={employee.id} value={employee.id}>
-                            {employee.fullName}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <label><span>Month Wage</span><input type="number" name="monthWage" defaultValue={currentSalaryStructure?.monthWage || 50000} /></label>
-                    <label><span>Working Days in a Week</span><input type="number" name="workingDaysPerWeek" defaultValue={currentSalaryStructure?.workingDaysPerWeek || 5} /></label>
-                    <label><span>Break Time (hrs)</span><input type="number" step="0.5" name="breakHours" defaultValue={currentSalaryStructure?.breakHours || 1} /></label>
-                    <label><span>Basic Salary %</span><input type="number" step="0.01" name="basicPercentage" defaultValue={currentSalaryStructure?.basicPercentage || 50} /></label>
-                    <label><span>HRA %</span><input type="number" step="0.01" name="hraPercentage" defaultValue={currentSalaryStructure?.hraPercentage || 25} /></label>
-                    <label><span>Standard Allowance %</span><input type="number" step="0.01" name="standardAllowancePercentage" defaultValue={currentSalaryStructure?.standardAllowancePercentage || 8.33} /></label>
-                    <label><span>Performance Bonus %</span><input type="number" step="0.01" name="performanceBonusPercentage" defaultValue={currentSalaryStructure?.performanceBonusPercentage || 4.17} /></label>
-                    <label><span>Leave Travel Allowance %</span><input type="number" step="0.01" name="leaveTravelAllowancePercentage" defaultValue={currentSalaryStructure?.leaveTravelAllowancePercentage || 4.17} /></label>
-                    <label><span>Fixed Allowance %</span><input type="number" step="0.01" name="fixedAllowancePercentage" defaultValue={currentSalaryStructure?.fixedAllowancePercentage || 8.33} /></label>
-                    <label><span>Employee PF %</span><input type="number" step="0.01" name="employeePfPercentage" defaultValue={currentSalaryStructure?.employeePfPercentage || 12} /></label>
-                    <label><span>Employer PF %</span><input type="number" step="0.01" name="employerPfPercentage" defaultValue={currentSalaryStructure?.employerPfPercentage || 12} /></label>
-                    <label><span>Professional Tax</span><input type="number" step="0.01" name="professionalTax" defaultValue={currentSalaryStructure?.professionalTax || 200} /></label>
-                    <label><span>Other Deduction</span><input type="number" step="0.01" name="otherDeduction" defaultValue={currentSalaryStructure?.otherDeduction || 0} /></label>
-                    <button type="submit" className="button primary">Save Salary Structure</button>
-                  </form>
-                </section>
+                      setStatus("Compensation saved.", "success");
+                      await loadView("payroll");
+                    } catch (error) {
+                      setStatus(error.message, "error");
+                    }
+                  }}
+                />
                 <section className="table-card">
                   <div className="panel-actions">
                     <div>
@@ -1717,14 +2744,32 @@ function App() {
                 <section className="panel">
                   <div className="profile-hero">
                     <div className="profile-avatar-wrap">
-                      <div className="profile-avatar">
+                      <div className="profile-avatar profile-avatar-large">
                         {state.me.profilePhoto ? <img src={state.me.profilePhoto} alt={state.me.fullName} /> : initialsFor(state.me.fullName)}
                       </div>
-                      <label>
-                        <span>Profile Photo</span>
-                        <input type="file" accept="image/*" onChange={(event) => event.target.files?.[0] && handleProfilePhotoChange(event.target.files[0])} />
-                      </label>
-                      <div className="metric-subtext">Upload a square photo for the profile menu and your profile page.</div>
+                      <input
+                        ref={profilePhotoInputRef}
+                        className="hidden"
+                        type="file"
+                        accept="image/*"
+                        onChange={(event) => event.target.files?.[0] && handleProfilePhotoChange(event.target.files[0])}
+                      />
+                      <div className="photo-actions-card">
+                        <div>
+                          <span className="eyebrow">Profile Photo</span>
+                          <div className="metric-subtext">Upload a clean square image for your profile and header avatar.</div>
+                        </div>
+                        <div className="photo-actions-row">
+                          <button type="button" className="button ghost small" onClick={() => profilePhotoInputRef.current?.click()}>
+                            {state.me.profilePhoto ? "Change Photo" : "Upload Photo"}
+                          </button>
+                          {state.me.profilePhoto ? (
+                            <button type="button" className="button ghost small danger-button" onClick={handleRemoveProfilePhoto}>
+                              Remove
+                            </button>
+                          ) : null}
+                        </div>
+                      </div>
                     </div>
                     <div className="stack">
                       <div className="panel-actions">
@@ -1744,59 +2789,141 @@ function App() {
                         <div className="profile-info-item"><span className="eyebrow">Mobile</span><div>{state.me.phone || "-"}</div></div>
                         <div className="profile-info-item"><span className="eyebrow">Designation</span><div>{state.me.designation || "-"}</div></div>
                       </div>
-                      <div className="profile-tabs">
-                        <span className="profile-tab">Resume</span>
-                        <span className="profile-tab">Private Info</span>
-                        <span className="profile-tab">Salary Info</span>
-                        <span className="profile-tab">Security</span>
-                      </div>
                     </div>
                   </div>
                 </section>
-                <section className="profile-long-grid">
-                  <article className="stack">
-                    <div className="profile-story-card"><h4>About</h4><p className="profile-text">{state.me.about || ""}</p></div>
-                    <div className="profile-story-card"><h4>What I Love About My Job</h4><p className="profile-text">{state.me.loveAboutJob || ""}</p></div>
-                    <div className="profile-story-card"><h4>My Interests and Hobbies</h4><p className="profile-text">{state.me.hobbies || ""}</p></div>
-                  </article>
-                  <article className="stack">
-                    <div className="profile-side-card"><h4>Skills</h4><p className="profile-text">{state.me.skills || ""}</p></div>
-                    <div className="profile-side-card"><h4>Certification</h4><p className="profile-text">{state.me.certifications || ""}</p></div>
-                  </article>
-                </section>
-                <section className="panel">
-                  <div className="panel-actions">
-                    <div><span className="eyebrow">Edit Profile</span><h3>Keep your information up to date</h3></div>
+                <section className="profile-tabs-panel panel">
+                  <div className="profile-tabs profile-tabs-large">
+                    {[
+                      ["resume", "Resume"],
+                      ["personal", "Personal Info"],
+                      ["salary", "Salary Info"],
+                      ["security", "Security"],
+                    ].map(([key, label]) => (
+                      <button
+                        key={key}
+                        type="button"
+                        className={`profile-tab ${state.profileTab === key ? "active" : ""}`}
+                        onClick={() => setState((prev) => ({ ...prev, profileTab: key }))}
+                      >
+                        {label}
+                      </button>
+                    ))}
                   </div>
-                  <form
-                    key={state.me.id}
-                    className="form-grid two-col"
-                    onSubmit={(event) => {
-                      event.preventDefault();
-                      const values = Object.fromEntries(new FormData(event.currentTarget).entries());
-                      handleProfileSave(values);
-                    }}
-                  >
-                    <input type="hidden" name="id" value={state.me.id} />
-                    <input type="hidden" name="profilePhoto" value={state.me.profilePhoto || ""} readOnly />
-                    <label><span>Full Name</span><input name="fullName" defaultValue={state.me.fullName} disabled={state.role === "Employee"} /></label>
-                    <label><span>Email</span><input name="email" defaultValue={state.me.email} disabled={state.role === "Employee"} /></label>
-                    <label><span>Phone</span><input name="phone" defaultValue={state.me.phone || ""} /></label>
-                    <label><span>Emergency Contact</span><input name="emergencyContact" defaultValue={state.me.emergencyContact || ""} /></label>
-                    <label><span>Company</span><input name="companyName" defaultValue={state.me.companyName || ""} disabled={state.role !== "Admin"} /></label>
-                    <label><span>Location</span><input name="location" defaultValue={state.me.location || ""} /></label>
-                    <label><span>Department</span><input name="department" defaultValue={state.me.department || ""} disabled={state.role === "Employee"} /></label>
-                    <label><span>Manager</span><input name="manager" defaultValue={state.me.manager || ""} disabled={!(state.role === "Admin" || state.role === "HR Officer")} /></label>
-                    <label className="two-col-span"><span>Address</span><textarea name="address" defaultValue={state.me.address || ""} /></label>
-                    <label className="two-col-span"><span>About</span><textarea name="about" defaultValue={state.me.about || ""} /></label>
-                    <label className="two-col-span"><span>What I Love About My Job</span><textarea name="loveAboutJob" defaultValue={state.me.loveAboutJob || ""} /></label>
-                    <label className="two-col-span"><span>My Interests and Hobbies</span><textarea name="hobbies" defaultValue={state.me.hobbies || ""} /></label>
-                    <label className="two-col-span"><span>Skills</span><textarea name="skills" defaultValue={state.me.skills || ""} /></label>
-                    <label className="two-col-span"><span>Certifications</span><textarea name="certifications" defaultValue={state.me.certifications || ""} /></label>
-                    <button type="submit" className="button primary">Save Profile</button>
-                  </form>
                 </section>
-                <SalaryCard salaryInfo={currentSalaryStructure?.salaryInfo} title="My Salary Info" />
+                {state.profileTab === "resume" && (
+                  <section className="panel">
+                    <div className="panel-actions">
+                      <div><span className="eyebrow">Resume</span><h3>Show your strengths clearly</h3></div>
+                    </div>
+                    <form
+                      key={`resume-${state.me.id}`}
+                      className="form-grid"
+                      onSubmit={(event) => {
+                        event.preventDefault();
+                        const values = Object.fromEntries(new FormData(event.currentTarget).entries());
+                        handleProfileSave({ ...values, id: state.me.id, profilePhoto: state.me.profilePhoto || "", companyLogo: state.settings.companyLogo || "" });
+                      }}
+                    >
+                      <label><FieldLabel icon="about">About</FieldLabel><textarea name="about" defaultValue={state.me.about || ""} /></label>
+                      <label><FieldLabel icon="heart">What I Love About My Job</FieldLabel><textarea name="loveAboutJob" defaultValue={state.me.loveAboutJob || ""} /></label>
+                      <label><FieldLabel icon="hobby">My Interests and Hobbies</FieldLabel><textarea name="hobbies" defaultValue={state.me.hobbies || ""} /></label>
+                      <label><FieldLabel icon="skills">Skills</FieldLabel><textarea name="skills" defaultValue={state.me.skills || ""} /></label>
+                      <label><FieldLabel icon="certificate">Certifications</FieldLabel><textarea name="certifications" defaultValue={state.me.certifications || ""} /></label>
+                      <button type="submit" className="button primary">Save Resume</button>
+                    </form>
+                  </section>
+                )}
+                {state.profileTab === "personal" && (
+                  <section className="panel">
+                    <div className="panel-actions">
+                      <div><span className="eyebrow">Edit Profile</span><h3>Keep your information up to date</h3></div>
+                    </div>
+                    <form
+                      key={state.me.id}
+                      className="form-grid two-col"
+                      onSubmit={(event) => {
+                        event.preventDefault();
+                        const values = Object.fromEntries(new FormData(event.currentTarget).entries());
+                        handleProfileSave(values);
+                      }}
+                    >
+                      <input type="hidden" name="id" value={state.me.id} />
+                      <input type="hidden" name="profilePhoto" value={state.me.profilePhoto || ""} readOnly />
+                      <input type="hidden" name="companyLogo" value={state.settings.companyLogo || ""} readOnly />
+                      <label><FieldLabel icon="user">Full Name</FieldLabel><input name="fullName" defaultValue={state.me.fullName} disabled={state.role === "Employee"} /></label>
+                      <label><FieldLabel icon="email">Email</FieldLabel><input name="email" defaultValue={state.me.email} disabled={state.role === "Employee"} /></label>
+                      <label><FieldLabel icon="phone">Phone</FieldLabel><input name="phone" defaultValue={state.me.phone || ""} /></label>
+                      <label><FieldLabel icon="emergency">Emergency Contact</FieldLabel><input name="emergencyContact" defaultValue={state.me.emergencyContact || ""} /></label>
+                      <label><FieldLabel icon="company">Company</FieldLabel><input name="companyName" defaultValue={state.me.companyName || ""} disabled={state.role !== "Admin"} /></label>
+                      <label><FieldLabel icon="location">Location</FieldLabel><input name="location" defaultValue={state.me.location || ""} /></label>
+                      <label><FieldLabel icon="department">Department</FieldLabel><input name="department" defaultValue={state.me.department || ""} disabled={state.role === "Employee"} /></label>
+                      <label><FieldLabel icon="manager">Manager</FieldLabel><input name="manager" defaultValue={state.me.manager || ""} disabled={!(state.role === "Admin" || state.role === "HR Officer")} /></label>
+                      <label className="two-col-span"><FieldLabel icon="address">Address</FieldLabel><textarea name="address" defaultValue={state.me.address || ""} /></label>
+                      <button type="submit" className="button primary">Save Profile</button>
+                    </form>
+                  </section>
+                )}
+                {state.profileTab === "salary" && (
+                  <SalaryCard salaryInfo={currentSalaryStructure?.salaryInfo} title="My Salary Info" />
+                )}
+                {state.profileTab === "security" && (
+                  <section className="panel">
+                    <div className="panel-actions">
+                      <div><span className="eyebrow">Security</span><h3>Update your password</h3></div>
+                    </div>
+                    <div className="security-shell">
+                      <form
+                        className="form-grid security-form-card"
+                        onSubmit={(event) => {
+                          event.preventDefault();
+                          handleChangePassword(Object.fromEntries(new FormData(event.currentTarget).entries()));
+                          event.currentTarget.reset();
+                        }}
+                      >
+                        <div>
+                          <span className="eyebrow">Password</span>
+                          <h3>Protect your account</h3>
+                        </div>
+                        <label><FieldLabel icon="lock">Current Password</FieldLabel><input type="password" name="currentPassword" autoComplete="current-password" required /></label>
+                        <label><FieldLabel icon="lock">New Password</FieldLabel><input type="password" name="newPassword" autoComplete="new-password" minLength="12" required /></label>
+                        <label><FieldLabel icon="lock">Confirm Password</FieldLabel><input type="password" name="confirmPassword" autoComplete="new-password" minLength="12" required /></label>
+                        <button type="submit" className="button primary">Change Password</button>
+                      </form>
+                      <div className="security-side-stack">
+                        <article className="profile-side-card security-theme-card">
+                          <span className="eyebrow">Appearance</span>
+                          <h3>Choose a workspace tone</h3>
+                          <div className="table-note">Pick the palette that fits how you work through long ERP sessions.</div>
+                          <div className="theme-grid">
+                            {THEME_OPTIONS.map((theme) => (
+                              <button
+                                key={theme.id}
+                                type="button"
+                                className={`theme-option ${state.theme === theme.id ? "active" : ""}`}
+                                onClick={() => handleThemeChange(theme.id)}
+                              >
+                                <span className={`theme-swatch ${theme.id}`}></span>
+                                <strong>{theme.name}</strong>
+                                <span>{theme.note}</span>
+                              </button>
+                            ))}
+                          </div>
+                        </article>
+                        <article className="profile-side-card security-tips-card">
+                          <span className="eyebrow">Security Tips</span>
+                          <h3>Keep your access clean</h3>
+                          <div className="table-note">A few simple habits keep the workspace safe and easier to trust.</div>
+                          <div className="list">
+                            <div className="list-item">Use a unique password with uppercase, lowercase, numbers, and symbols.</div>
+                            <div className="list-item">Update your profile photo so colleagues can recognize your account quickly.</div>
+                            <div className="list-item">Review your theme and profile details regularly for a cleaner workspace.</div>
+                          </div>
+                        </article>
+                      </div>
+                    </div>
+                  </section>
+                )}
               </>
             )}
 
@@ -1840,7 +2967,7 @@ function App() {
                     </div>
                     <div className="report-actions">
                       <button type="submit" className="button primary">Load Report</button>
-                      <button type="button" className="button ghost" onClick={() => downloadCsv(`empay-${state.reportType}-${state.currentMonth}.csv`, state.report?.rows || [])}>Download CSV</button>
+                      <button type="button" className="button ghost" onClick={() => downloadExcel(`empay-${state.reportType}-${state.currentMonth}.xls`, state.report?.rows || [])}>Download Excel</button>
                     </div>
                   </form>
                 </section>
@@ -1922,6 +3049,7 @@ function App() {
           </section>
         </main>
       </section>
+      <ToastViewport toasts={state.toasts} />
     </>
   );
 }

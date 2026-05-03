@@ -11,3 +11,4 @@ email-validator==2.3.0
 fastapi-mail==1.4.2
 alembic==1.12.0
 psycopg2-binary==2.9.10
+aiosqlite==0.21.0

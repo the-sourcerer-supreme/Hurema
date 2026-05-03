@@ -31,8 +31,17 @@ class EmployeeProfile(Base):
     pan_number = Column(String(20), nullable=True)
     uan_number = Column(String(50), nullable=True)
     basic_salary = Column(Float, nullable=False, default=0.0)
+    emergency_contact = Column(String(100), nullable=True)
+    about = Column(String(1000), nullable=True)
+    love_about_job = Column(String(1000), nullable=True)
+    hobbies = Column(String(1000), nullable=True)
+    skills = Column(String(1000), nullable=True)
+    certifications = Column(String(1000), nullable=True)
+    profile_photo = Column(String, nullable=True)
+    manager_name = Column(String(150), nullable=True)
 
-    user = relationship("User", back_populates="profile")
+    user = relationship("User", back_populates="profile", foreign_keys=[user_id])
+    manager = relationship("User", foreign_keys=[manager_id])
 
     def __repr__(self) -> str:
         return f"<EmployeeProfile(user_id={self.user_id}, basic_salary={self.basic_salary})>"

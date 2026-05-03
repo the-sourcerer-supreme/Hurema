@@ -1,3 +1,4 @@
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import declarative_base
 from app.core.config import get_settings
@@ -38,6 +39,22 @@ class DatabaseManager:
             self.initialize()
         async with self.engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+            if self.engine.dialect.name == "postgresql":
+                await conn.execute(
+                    text("ALTER TABLE company_settings ADD COLUMN IF NOT EXISTS company_logo TEXT DEFAULT ''")
+                )
+                await conn.execute(
+                    text("ALTER TABLE attendance ADD COLUMN IF NOT EXISTS pause_started_at TIMESTAMP WITH TIME ZONE")
+                )
+                await conn.execute(
+                    text("ALTER TABLE attendance ADD COLUMN IF NOT EXISTS paused_minutes DOUBLE PRECISION DEFAULT 0.0")
+                )
+                await conn.execute(
+                    text("ALTER TABLE attendance ADD COLUMN IF NOT EXISTS session_started_at TIMESTAMP WITH TIME ZONE")
+                )
+                await conn.execute(
+                    text("ALTER TABLE attendance ADD COLUMN IF NOT EXISTS accumulated_hours DOUBLE PRECISION DEFAULT 0.0")
+                )
 
     async def close(self) -> None:
         if self.engine is not None:

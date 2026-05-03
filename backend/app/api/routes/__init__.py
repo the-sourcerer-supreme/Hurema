@@ -7,8 +7,10 @@ from app.api.routes.leaves import router as leaves_router
 from app.api.routes.payroll import router as payroll_router
 from app.api.routes.payslips import router as payslips_router
 from app.api.routes.dashboard import router as dashboard_router
+from app.api.routes.frontend import router as frontend_router
 
 api_router = APIRouter()
+api_router.include_router(frontend_router)
 api_router.include_router(auth_router)
 api_router.include_router(users_router)
 api_router.include_router(profile_router)

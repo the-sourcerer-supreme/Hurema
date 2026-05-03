@@ -12,25 +12,28 @@ EmPay is a self-contained HRMS web app with:
 ## Project Structure
 
 - `frontend/` - static web app UI
-- `backend/` - Node.js HTTP server and JSON persistence
+- `backend/` - FastAPI backend with PostgreSQL persistence
 
 ## Run
 
-If `node` is available on your machine:
+Start the app from the repo root:
 
-```bash
+```powershell
 npm start
 ```
 
-If you want to use the bundled runtime from this workspace:
+The startup script will:
 
-```powershell
-& 'C:\Users\acer\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe' 'C:\Users\acer\Documents\New project\backend\server.js'
-```
+- create or reuse `backend/.venv313`
+- install backend dependencies into that local Python 3.13 environment when needed
+- create or reuse the PostgreSQL database from `backend/.env`
+- serve the built frontend at `http://127.0.0.1:8000`
 
 Then open:
 
-- `http://localhost:3000`
+- `http://127.0.0.1:8000`
+
+For frontend-only development, run `npm run dev` in the repo root. Vite proxies `/api` requests to the backend on port `8000`.
 
 ## Demo Accounts
 
@@ -41,6 +44,6 @@ Then open:
 
 ## Notes
 
-- The app persists data in `backend/data/db.json`.
-- The JSON database is seeded automatically on first run.
-- `backend/data/db.json` is ignored in git so each run can create its own local dataset.
+- The default local setup uses PostgreSQL via `DATABASE_URL` in `backend/.env`.
+- Demo data is seeded automatically on first run.
+- The backend serves the built frontend from `frontend/dist`.

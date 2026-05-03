@@ -19,7 +19,7 @@ class LeaveRequest(Base):
     approved_by = Column(Integer, ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
-    user = relationship("User", back_populates="leave_requests")
+    user = relationship("User", back_populates="leave_requests", foreign_keys=[user_id])
 
     def __repr__(self) -> str:
         return f"<LeaveRequest(user_id={self.user_id}, status={self.status})>"

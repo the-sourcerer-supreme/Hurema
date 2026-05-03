@@ -32,10 +32,15 @@ class User(Base):
     created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
-    profile = relationship("EmployeeProfile", back_populates="user", uselist=False)
+    profile = relationship(
+        "EmployeeProfile",
+        back_populates="user",
+        uselist=False,
+        foreign_keys="EmployeeProfile.user_id",
+    )
     attendance_records = relationship("Attendance", back_populates="user")
-    leave_requests = relationship("LeaveRequest", back_populates="user")
-    payrolls = relationship("Payroll", back_populates="user")
+    leave_requests = relationship("LeaveRequest", back_populates="user", foreign_keys="LeaveRequest.user_id")
+    payrolls = relationship("Payroll", back_populates="user", foreign_keys="Payroll.user_id")
     payslips = relationship("Payslip", back_populates="user")
     email_logs = relationship("EmailLog", back_populates="user")
     creator = relationship("User", remote_side=[id])

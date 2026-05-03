@@ -4,7 +4,7 @@
   "private": true,
   "description": "EmPay Smart Human Resource Management System",
   "scripts": {
-    "start": "node backend/server.js",
+    "start": "powershell -ExecutionPolicy Bypass -File scripts/start.ps1",
     "build": "vite build",
     "dev": "vite"
   },
